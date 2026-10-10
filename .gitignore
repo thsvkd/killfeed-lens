@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+.env.*
+data/*
+!data/.gitkeep
+*.sqlite3*
+*.capture.lock
+:memory:.ses
+.superpowers/

@@ -1,0 +1,1 @@
+"""Independent observed-history output."""

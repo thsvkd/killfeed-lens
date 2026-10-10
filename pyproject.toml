@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "killfeed-lens"
+version = "0.1.0"
+description = "Local PUBG killfeed pixel recognition and post-match validation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26", "opencv-python>=4.10,<5", "httpx>=0.27,<1", "PyYAML>=6,<7"]
+
+[project.optional-dependencies]
+ocr = ["rapidocr-onnxruntime>=1.4,<2"]
+windows = ["dxcam>=0.3,<1; sys_platform == 'win32'"]
+dev = ["pytest>=8,<10", "ruff>=0.9", "mypy>=1.14", "types-PyYAML>=6"]
+
+[project.scripts]
+kfocr = "kfocr.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kfocr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+check_untyped_defs = true
