@@ -28,13 +28,13 @@ class Frames:
 
 
 class Text:
-    def __init__(self, fail_first=False):
+    def __init__(self, fail_first=False, fail_calls=()):
         self.calls = 0
-        self.fail_first = fail_first
+        self.fail_calls = {1} if fail_first else set(fail_calls)
 
     def recognize(self, image):
         self.calls += 1
-        if self.fail_first and self.calls == 1:
+        if self.calls in self.fail_calls:
             raise RuntimeError("test inference failure")
         return [OCRToken("AAAA", 0.99, (20, 10, 70, 30)),
                 OCRToken("BBBB", 0.99, (130, 10, 190, 30))]
@@ -169,3 +169,14 @@ def test_failed_historical_replay_ends_on_video_timeline(tmp_path):
     assert session.status == "aborted"
     assert (session.ended_at_utc - old_start).total_seconds() == 1.1
     store.close()
+
+
+def test_ocr_failures_do_not_reemit_persistent_row(tmp_path):
+    from kfocr.pipeline import Pipeline
+
+    sink = Sink()
+    # Two failures (800ms, 1200ms) leave a gap longer than max_gap since the last success.
+    session = Pipeline(setup(tmp_path), Frames(), recognizer=Text(fail_calls=(3, 4)),
+                       icons=Icons(), sink=sink).run()
+    assert session.metadata["performance"]["ocr_errors"] == 2
+    assert len(sink.events) == 1

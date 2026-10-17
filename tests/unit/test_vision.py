@@ -83,8 +83,10 @@ def test_default_rapidocr_disables_runtime_telemetry_before_engine_creation(monk
     rapidocr = ModuleType("rapidocr_onnxruntime")
 
     class FakeRapidOCR:
-        def __init__(self):
+        def __init__(self, **settings):
             assert calls == ["disable_telemetry"]
+            # Bounded ONNX threads and no angle classifier keep OCR from starving the game.
+            assert settings == {"intra_op_num_threads": 2, "inter_op_num_threads": 1, "use_cls": False}
             calls.append("create_engine")
 
     rapidocr.RapidOCR = FakeRapidOCR
@@ -242,3 +244,40 @@ def test_row_assembler_clusters_by_vertical_overlap_sorts_elements_and_fingerpri
     assert rows[0].row_confidence == pytest.approx(0.8833333333333333)
     assert rows[0].crop_phash is not None and len(rows[0].crop_phash) == 16
     assert [element.label for element in rows[1].elements] == ["Other"]
+
+
+def test_read_badges_finds_black_boxed_team_numbers_and_masks_them():
+    from kfocr.vision.badges import find_badges, mask_badges, read_badges
+
+    image = np.full((40, 140, 3), (40, 35, 30), dtype=np.uint8)
+    cv2.rectangle(image, (10, 8), (32, 31), (0, 0, 0), 1)  # 1px pure-black border
+    image[9:31, 11:32] = (20, 103, 110)
+    cv2.putText(image, "49", (13, 25), cv2.FONT_HERSHEY_PLAIN, 1.0, (255, 255, 255), 1)
+    cv2.putText(image, "Name", (38, 25), cv2.FONT_HERSHEY_PLAIN, 1.0, (255, 255, 255), 1)
+    image[0:40, 120:122] = 0  # a plain black line beside a dark background is no badge
+    crops: list[np.ndarray] = []
+
+    def read(images):
+        crops.extend(images)
+        return [("49", 0.99)] * len(images)
+
+    badges = read_badges(image, read)
+
+    assert find_badges(image) == [(11, 8, 32, 32)]
+    assert len(crops) == 1 and crops[0].shape[0] > 2 * 24  # upscaled before reading
+    assert [(b.kind, b.label, b.bbox) for b in badges] == [(VisualKind.BADGE, "49", (11, 8, 32, 32))]
+    masked = mask_badges(image, badges)
+    assert (masked[8:32, 10:33] == (40, 35, 30)).all()  # painted with the row background
+    assert np.array_equal(masked[:, 40:], image[:, 40:])
+    assert read_badges(image, lambda images: [("A", 0.9)] * len(images)) == []
+
+
+def test_rapidocr_read_lines_uses_recognition_only():
+    class FakeEngine:
+        def text_rec(self, images):
+            return [("12", 0.98) for _ in images], 0.01
+
+    recognizer = RapidOCRRecognizer(engine=FakeEngine())
+
+    assert recognizer.read_lines([np.zeros((20, 20, 3), np.uint8)]) == [("12", 0.98)]
+    assert recognizer.read_lines([]) == []

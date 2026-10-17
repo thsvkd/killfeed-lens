@@ -52,6 +52,7 @@ class OCRToken:
 class VisualKind(StrEnum):
     TEXT = "text"
     ICON = "icon"
+    BADGE = "badge"  # team number box, read on its own
 
 
 @dataclass(frozen=True)

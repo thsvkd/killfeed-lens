@@ -146,8 +146,9 @@ class Pipeline:
         from kfocr.domain.parser import EventParser
         from kfocr.domain.tracker import TemporalTracker
         from kfocr.storage.db import EventStore
+        from kfocr.vision.badges import mask_badges, read_badges
         from kfocr.vision.change import EdgeChangeDetector
-        from kfocr.vision.icons import TemplateIconRecognizer
+        from kfocr.vision.icons import TemplateIconRecognizer, mask_icons
         from kfocr.vision.preprocess import preprocess
         from kfocr.vision.roi import crop_roi, pixel_rect
         from kfocr.vision.rows import RowAssembler
@@ -159,6 +160,7 @@ class Pipeline:
         own_store = self.store is None
         recognizer = self.recognizer or RapidOCRRecognizer()
         icons = self.icons or TemplateIconRecognizer(self.config.vision.icon_template_dir)
+        read_lines = getattr(recognizer, "read_lines", None)  # badges need recognition-only OCR
         manifest = self.manifest or {
             "manifest_version": 1,
             "ocr": getattr(recognizer, "model_manifest", lambda: {
@@ -262,15 +264,22 @@ class Pipeline:
                         last_infer_ns, previous_roi = end_ns, roi.copy()
                         started = time.perf_counter()
                         self.performance["inference_calls"] += 1
+                        ocr_failed = False
                         try:
-                            tokens = recognizer.recognize(preprocess(roi))
                             visual = icons.detect(roi)
-                            rows = assembler.assemble(tokens, visual, frame.seq, end_ns, roi)
+                            try:
+                                badges = read_badges(roi, read_lines) if read_lines else []
+                            except Exception:  # badges only refine teams; keep the row OCR
+                                log_event("badge.error", frame_seq=frame.seq)
+                                badges = []
+                            tokens = recognizer.recognize(
+                                preprocess(mask_icons(mask_badges(roi, badges), visual)))
+                            rows = assembler.assemble(tokens, visual + badges, frame.seq, end_ns, roi)
                             candidates = [event for row in rows if (event := parser.parse(row))]
                         except Exception:
                             self.performance["ocr_errors"] += 1
                             log_event("ocr.error", frame_seq=frame.seq)
-                            candidates = []
+                            candidates, ocr_failed = [], True
                         self._ocr_ms.append((time.perf_counter() - started) * 1000)
                         x, y, _, _ = pixel_rect(self.config.roi.rect, frame.width, frame.height)
                         candidates = [replace(c, source_bbox=(c.source_bbox[0] + x,
@@ -278,7 +287,8 @@ class Pipeline:
                             for c in candidates]
                         self.performance["candidate_reject_count"] += sum(
                             c.confidence_total < self.config.confidence.candidate_min for c in candidates)
-                        confirmed = tracker.update(candidates, end_ns)
+                        # A failed inference is not evidence that rows disappeared.
+                        confirmed = [] if ocr_failed else tracker.update(candidates, end_ns)
                         self._save_frame(frame, session)
                         for event in confirmed:
                             self._save_crop(event, frame, session)

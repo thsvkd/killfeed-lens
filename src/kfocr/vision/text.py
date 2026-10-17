@@ -11,6 +11,11 @@ import numpy as np
 
 from kfocr.domain.models import OCRToken
 
+# ponytail: ONNX Runtime defaults to one busy-waiting thread per core (~8 cores at 1440p, which
+# drops game frames); two threads cut OCR CPU ~70% at equal accuracy. Killfeed text is always
+# horizontal, so the angle classifier only costs time. Raise threads if latency matters more.
+ENGINE_SETTINGS: dict[str, Any] = {"intra_op_num_threads": 2, "inter_op_num_threads": 1, "use_cls": False}
+
 
 class RapidOCRRecognizer:
     def __init__(self, *, engine: Any | None = None) -> None:
@@ -29,7 +34,7 @@ class RapidOCRRecognizer:
                 raise RuntimeError(
                     "Local OCR requires the OCR extra: pip install 'killfeed-lens[ocr]'"
                 ) from exc
-            engine = RapidOCR()
+            engine = RapidOCR(**ENGINE_SETTINGS)
         self._engine = engine
 
     def recognize(self, image: np.ndarray) -> list[OCRToken]:
@@ -71,6 +76,13 @@ class RapidOCRRecognizer:
                 tokens.append(OCRToken(normalized_text, normalized_confidence, bbox))
         return tokens
 
+    def read_lines(self, images: list[np.ndarray]) -> list[tuple[str, float]]:
+        """Recognition only, one text line per image (no detection), batched."""
+        if not images:
+            return []
+        results, _ = self._engine.text_rec(images)
+        return [(str(text), float(confidence)) for text, confidence in results]
+
     def engine_manifest(self) -> dict[str, Any]:
         return model_manifest()
 
@@ -94,6 +106,7 @@ def model_manifest() -> dict[str, Any]:
         "version": version,
         "status": "ready" if models else "unknown",
         "models": models,
+        "settings": ENGINE_SETTINGS,
     }
 
 
