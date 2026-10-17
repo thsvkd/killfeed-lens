@@ -76,3 +76,18 @@ def test_installer_is_per_user_without_elevation() -> None:
     assert "PrivilegesRequired=lowest" in iss
     assert r"DefaultDirName={localappdata}\Programs\killfeed-lens" in iss
     assert "OutputBaseFilename=killfeed-lens-{#AppVersion}-setup" in iss
+
+
+def test_git_lookup_never_flashes_a_console(monkeypatch) -> None:
+    import subprocess
+    import sys
+
+    from kfocr import pipeline
+
+    calls = []
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda *a, **kw: calls.append(kw) or
+                        subprocess.CompletedProcess(a, 0, stdout="abc\n"))
+    assert pipeline._git_commit() == "abc"
+    assert calls[0]["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert pipeline._git_commit() is None and len(calls) == 1  # installed app: git is not run

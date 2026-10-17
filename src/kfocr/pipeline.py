@@ -7,6 +7,7 @@ import platform
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -67,9 +68,13 @@ def _session_lock(path: str):
 
 
 def _git_commit() -> str | None:
+    if getattr(sys, "frozen", False):  # installed build: no checkout, cwd may be some other repo
+        return None
     try:
+        # no window: from a windowless GUI process, a console child would flash its own console
         result = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                                text=True, timeout=2, check=True)
+                                text=True, timeout=2, check=True,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return result.stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return None
