@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from ctypes import wintypes
 from pathlib import Path
 from tkinter import font as tkfont
@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Literal, TextIO
 
 from kfocr.domain.models import ConfirmedEvent, EventType, NormalizedRect
 from kfocr.ui.teams import Ledger, Status, Team, make_event
+from kfocr.vision.roi import pixel_rect
 
 if TYPE_CHECKING:
     from kfocr.ui.live import LiveCapture
@@ -381,6 +382,7 @@ def tail_jsonl(sink: GuiSink, stream: TextIO, stop: threading.Event) -> None:
 
 # --- Windows glue: stay in front without taking focus, global hotkey ------------------------
 _EX_NOACTIVATE, _EX_TOOLWINDOW, _EX_TOPMOST = 0x08000000, 0x00000080, 0x00000008
+_EX_TRANSPARENT = 0x00000020  # with Tk's WS_EX_LAYERED (alpha): mouse falls through to the game
 _SWP_KEEP = 0x0001 | 0x0002 | 0x0010  # NOSIZE | NOMOVE | NOACTIVATE
 _SWP_FRAMECHANGED = 0x0020
 
@@ -400,20 +402,21 @@ def _user32():
     return u
 
 
-def pin_on_top(widget: tk.Misc) -> int:
+def pin_on_top(widget: tk.Misc, want: int = _EX_NOACTIVATE | _EX_TOOLWINDOW | _EX_TOPMOST,
+               drop: int = 0) -> int:
     """Keep a toplevel above other windows without activating it; returns its extended style.
 
+    `want`/`drop`: extended styles to set/clear (toolwindow: no taskbar/alt-tab entry).
     Does nothing off Windows. Cannot draw over exclusive-fullscreen games (borderless is fine).
     """
     if sys.platform != "win32":
         return 0
     u = _user32()
     hwnd = u.GetParent(widget.winfo_id())
-    want = _EX_NOACTIVATE | _EX_TOOLWINDOW | _EX_TOPMOST  # toolwindow: no taskbar/alt-tab entry
     style = u.GetWindowLongW(hwnd, -20)
     flags = _SWP_KEEP
-    if style & want != want:
-        u.SetWindowLongW(hwnd, -20, style | want)
+    if (style | want) & ~drop != style:
+        u.SetWindowLongW(hwnd, -20, (style | want) & ~drop)
         flags |= _SWP_FRAMECHANGED
     u.SetWindowPos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0, flags)  # HWND_TOPMOST
     return u.GetWindowLongW(hwnd, -20) & 0xFFFFFFFF
@@ -490,6 +493,173 @@ def clear_of(box: tuple[float, float, float, float], roi: tuple[float, float, fl
     return int(a), int(b)
 
 
+# --- ROI box: a live selection frame over the game ------------------------------------------
+GRIP, ROI_MIN = 8, 24  # px: edge band that resizes; smallest box side
+ROI_DEFAULT = NormalizedRect(0.68, 0.0, 0.31, 0.2)  # PUBG killfeed corner, top-right
+ROI_LINE, ROI_FILL, ROI_KEY = "#58A6FF", "#1F3A5F", "#FF00FE"  # key: see-through colour
+_CURSOR = {"n": "size_ns", "s": "size_ns", "e": "size_we", "w": "size_we", "nw": "size_nw_se",
+           "se": "size_nw_se", "ne": "size_ne_sw", "sw": "size_ne_sw", "": "fleur"}
+
+
+def edge_at(x: float, y: float, w: float, h: float, grip: int = GRIP) -> str:
+    """Which edge/corner ("n", "se", ...) a point inside a w x h box is on; "" = interior."""
+    return ("n" if y < grip else "s" if y >= h - grip else "") + (
+        "w" if x < grip else "e" if x >= w - grip else "")
+
+
+def drag_box(box: tuple[int, int, int, int], edge: str, dx: int, dy: int,
+             screen: tuple[int, int], least: int = ROI_MIN) -> tuple[int, int, int, int]:
+    """box (x, y, w, h) after dragging `edge` by (dx, dy) ("" moves it), kept on screen."""
+    x, y, w, h = box
+    sw, sh = screen
+    if not edge:
+        return min(max(0, x + dx), sw - w), min(max(0, y + dy), sh - h), w, h
+    left, top, right, bottom = x, y, x + w, y + h
+    if "w" in edge:
+        left = min(max(0, left + dx), right - least)
+    if "e" in edge:
+        right = max(min(sw, right + dx), left + least)
+    if "n" in edge:
+        top = min(max(0, top + dy), bottom - least)
+    if "s" in edge:
+        bottom = max(min(sh, bottom + dy), top + least)
+    return left, top, right - left, bottom - top
+
+
+def box_to_rect(box: tuple[int, int, int, int], screen: tuple[int, int]) -> NormalizedRect:
+    x, y, w, h = box
+    sw, sh = screen
+    return NormalizedRect(x / sw, y / sh, min(w / sw, 1 - x / sw), min(h / sh, 1 - y / sh))
+
+
+class RoiBox:
+    """Borderless always-on-top ROI frame, drawn like the drag selection.
+
+    Editing: edges resize, inside drags it, Enter confirms, Esc cancels (keys need its focus; click
+    it to get it back from the game). Confirmed: a faint outline that mouse and keyboard fall
+    through and screen capture never sees. ROI is normalized to Tk's primary screen.
+    """
+
+    def __init__(self, root: tk.Misc, on_confirm: Callable[[NormalizedRect], None],
+                 on_cancel: Callable[[], None]):
+        self.on_confirm, self.on_cancel = on_confirm, on_cancel
+        self.editing, self.focused = False, False
+        self.box, self._press = (0, 0, 1, 1), (0, 0, (0, 0, 1, 1), "")
+        top = self.top = tk.Toplevel(root)
+        top.withdraw()
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        self.c = tk.Canvas(top, highlightthickness=0, bd=0)
+        self.c.pack(fill="both", expand=True)
+        self.c.bind("<Configure>", lambda _e: self._draw())
+        self.c.bind("<Motion>", self._hover)
+        self.c.bind("<ButtonPress-1>", self._grab)
+        self.c.bind("<B1-Motion>", self._drag)
+        top.bind("<FocusIn>", lambda _e: self._focus(True))
+        top.bind("<FocusOut>", lambda _e: self._focus(False))
+        for key in ("<Return>", "<KP_Enter>"):
+            top.bind(key, lambda _e: self.confirm())
+        top.bind("<Escape>", lambda _e: self.cancel())
+
+    @property
+    def screen(self) -> tuple[int, int]:
+        return self.top.winfo_screenwidth(), self.top.winfo_screenheight()
+
+    @property
+    def visible(self) -> bool:
+        return self.top.state() == "normal"
+
+    def edit(self, rect: NormalizedRect | None) -> None:
+        self.editing = True
+        self.top.attributes("-transparentcolor", "")
+        self.top.attributes("-alpha", 0.55)
+        self._show(rect or ROI_DEFAULT)
+        self.top.focus_force()
+
+    def show(self, rect: NormalizedRect) -> None:
+        """Confirmed look: see-through inside, faint outline, inert to input."""
+        self.editing = False
+        self.top.attributes("-alpha", 0.6)
+        self.top.attributes("-transparentcolor", ROI_KEY)
+        self._show(rect)
+
+    def hide(self) -> None:
+        self.editing = False
+        self.top.withdraw()
+
+    def confirm(self) -> None:
+        if self.editing:
+            rect = box_to_rect(self.box, self.screen)
+            self.show(rect)
+            self.on_confirm(rect)
+
+    def cancel(self) -> None:
+        if self.editing:
+            self.hide()
+            self.on_cancel()
+
+    def keep_on_top(self) -> None:
+        """Re-assert z-order and input/capture styles; Tk and games can reset them."""
+        if not self.visible:
+            return
+        if self.editing:
+            pin_on_top(self.top, _EX_TOOLWINDOW | _EX_TOPMOST, _EX_NOACTIVATE | _EX_TRANSPARENT)
+        else:
+            pin_on_top(self.top, _EX_NOACTIVATE | _EX_TOOLWINDOW | _EX_TOPMOST | _EX_TRANSPARENT)
+        if not hide_from_capture(self.top) and not self.editing:
+            self.top.withdraw()  # it sits right on the killfeed: never let the OCR read the outline
+
+    def _show(self, rect: NormalizedRect) -> None:
+        sw, sh = self.screen
+        left, top, right, bottom = pixel_rect(rect, sw, sh)
+        self.box = (left, top, right - left, bottom - top)
+        self.top.geometry(f"{self.box[2]}x{self.box[3]}+{left}+{top}")
+        self.top.deiconify()
+        self.top.update_idletasks()
+        self.keep_on_top()
+        self._draw()
+
+    def _focus(self, on: bool) -> None:
+        self.focused = on
+        self._draw()
+
+    def _hover(self, e: tk.Event) -> None:
+        if self.editing:
+            self.c.configure(cursor=_CURSOR[edge_at(e.x, e.y, self.box[2], self.box[3])])
+
+    def _grab(self, e: tk.Event) -> None:
+        if self.editing:
+            self.top.focus_force()
+            self._press = (e.x_root, e.y_root, self.box, edge_at(e.x, e.y, self.box[2], self.box[3]))
+
+    def _drag(self, e: tk.Event) -> None:
+        if not self.editing:
+            return
+        x0, y0, box, edge = self._press
+        self.box = drag_box(box, edge, e.x_root - x0, e.y_root - y0, self.screen)
+        x, y, w, h = self.box
+        self.top.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _draw(self) -> None:
+        c, (_, _, w, h) = self.c, self.box
+        c.delete("all")
+        if not self.editing:
+            c.configure(bg=ROI_KEY, cursor="")
+            c.create_rectangle(1, 1, w - 1, h - 1, outline=ROI_LINE, width=2)
+            return
+        line = ROI_LINE if self.focused else DIM
+        c.configure(bg=ROI_FILL)
+        c.create_rectangle(1, 1, w - 1, h - 1, outline=line, width=3)
+        c.create_line(w / 2, 0, w / 2, h, fill=line)  # crosshair, as in the drag selection
+        c.create_line(0, h / 2, w, h / 2, fill=line)
+        for hx, hy in ((0, 0), (w, 0), (0, h), (w, h)):
+            c.create_rectangle(hx - GRIP, hy - GRIP, hx + GRIP, hy + GRIP, fill=line, outline="")
+        hint = ("Enter 확정 · Esc 취소" if self.focused else "클릭하면 Enter/Esc 사용") + \
+            " · 테두리: 크기 · 안쪽: 이동"
+        _t(c, w / 2, 16, hint, 12, TEXT, anchor="center", bold=True)
+        _t(c, w / 2, h - 14, f"{w}x{h}", 11, TEXT, anchor="center", num=True)
+
+
 class App:
     """Cards window (main) + optional always-on-top overlay, both drawn from one Ledger."""
 
@@ -516,9 +686,10 @@ class App:
         tk.Label(bar, text=f"{keys} · PUBG는 '전체 창 모드(테두리 없음)'에서만 오버레이가 보임",
                  bg=PANEL, fg=DIM, font=_f(11)).pack(side="left", padx=4)
         if live:
-            tk.Button(bar, text="ROI 다시 보정", command=live.recalibrate, bg=LINE, fg=TEXT, bd=0,
-                      padx=14, pady=5, activebackground=FAINT, activeforeground=TEXT, font=_f(12),
-                      cursor="hand2").pack(side="right", padx=10, pady=8)
+            for text, command in (("ROI 표시/숨김", live.toggle_box), ("ROI 조정", live.recalibrate)):
+                tk.Button(bar, text=text, command=command, bg=LINE, fg=TEXT, bd=0, padx=14, pady=5,
+                          activebackground=FAINT, activeforeground=TEXT, font=_f(12),
+                          cursor="hand2").pack(side="right", padx=(0, 10), pady=8)
         self.status = tk.Label(bar, bg=PANEL, fg=TEXT, font=_f(11))
         self.status.pack(side="right", padx=4)
         self.canvas = tk.Canvas(root, bg=BG, highlightthickness=0)
@@ -612,6 +783,11 @@ class App:
         if int(now) != self._second and self.overlay_on:
             pin_on_top(self.top)  # games and other windows can push it down; re-assert each second
             hide_from_capture(self.top)  # needs the mapped hwnd, so not in set_overlay
+        if int(now) != self._second and self.live:
+            self.live.box.keep_on_top()
+            if self.live.roi != self.roi:  # re-calibrated: push the overlay off the new ROI
+                self.roi = self.live.roi
+                self._place(self._overlay_h or 200)
         animating = any(now - t.touched < FLASH_S for t in self.led.teams.values() if t.touched)
         if changed or animating or self.dirty or int(now) != self._second:
             self._second, self.dirty = int(now), False
@@ -623,6 +799,8 @@ def run(*, overlay: bool, demo: bool, jsonl: TextIO | None, speed: float = 1.0,
         teams: int | None = None, exit_after: float | None = None,
         roi: NormalizedRect | None = None, live_dir: Path | None = None,
         roi_profile: Path | None = None) -> None:
+    if sys.platform == "win32":  # dxcam turns this on at the first grab anyway; Tk must agree from
+        ctypes.windll.user32.SetProcessDPIAware()  # the start so ROI pixels match captured ones
     root = tk.Tk()
     events: queue.Queue[ConfirmedEvent] = queue.Queue()
     sink, stop, hotkey = GuiSink(events), threading.Event(), Hotkey()

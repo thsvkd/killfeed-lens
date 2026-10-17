@@ -18,8 +18,11 @@ PUBG 킬피드에 표시된 픽셀을 로컬 OCR로 읽고, 관측한 이벤트�
 | `killfeed-lens-{version}-portable.exe` | 설치 없이 실행합니다. 시작할 때마다 압축을 풀기 때문에 설치판보다 늦게 뜹니다. |
 
 실행하면 팀 현황 창이 열리고 화면 캡처를 시작합니다(`kfocr gui --live`와 같습니다). 킬피드 ROI를
-보정하지 않았다면 첫 실행에서 드래그로 보정하도록 안내하고, 툴바의 **ROI 다시 보정**으로 언제든 다시
-보정할 수 있습니다. 설정(`config.yaml`), ROI(`roi.yaml`), SQLite DB, 세션 artifacts, 로그(`logs\killfeed-lens.log`)는
+보정하지 않았다면 첫 실행에서 보정하도록 안내합니다. 항상 위에 뜨는 영역 창의 테두리를 끌어 크기를, 안쪽을
+끌어 위치를 킬피드에 맞추고 Enter로 확정합니다(Esc: 취소). 게임을 클릭해 포커스를 넘겨도 창은 위에 남고, 다시
+클릭하면 Enter/Esc를 쓸 수 있습니다. 확정한 영역은 흐린 테두리로 남으며 마우스·키보드 입력을 게임으로 그대로
+통과시키고 화면 캡처에도 찍히지 않습니다. 툴바의 **ROI 조정**으로 언제든 다시 맞추고, **ROI 표시/숨김**으로
+테두리를 켜고 끕니다(PUBG는 '전체 창 모드(테두리 없음)'에서만 보임). 설정(`config.yaml`), ROI(`roi.yaml`), SQLite DB, 세션 artifacts, 로그(`logs\killfeed-lens.log`)는
 `%LOCALAPPDATA%\killfeed-lens`에 저장되며, 제거해도 이 폴더는 남습니다. PUBG UI 패치 2026-10용 아이콘
 템플릿(`src/kfocr/assets/icons/2026-10`)이 포함되어 있어 별도 설정 없이 이벤트를 확정합니다. 다른 템플릿을 쓰려면
 이 폴더의 `config.yaml`에 `vision.icon_template_dir`를 지정합니다(설정 파일 기준 상대 경로 가능). 이 기본값은 GUI

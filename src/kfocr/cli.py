@@ -6,7 +6,6 @@ import os
 import sqlite3
 import sys
 import time
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,10 +13,9 @@ from uuid import UUID
 
 import cv2
 import httpx
-import yaml
 
 from kfocr import __version__
-from kfocr.config import AppConfig, apply_roi_profile, load_config
+from kfocr.config import AppConfig, apply_roi_profile, load_config, save_roi_profile
 from kfocr.domain.models import NormalizedRect
 from kfocr.logging import configure_logging, log_event
 
@@ -263,10 +261,7 @@ def _calibrate(args) -> None:
         rect = NormalizedRect(x / width, y / height, w / width, h / height)
     if args.ui_scale is not None and not 1 <= args.ui_scale <= 1000:
         raise ValueError("UI scale must be in [1, 1000]")
-    profile = {"roi": {"profile": args.output.stem, "rect": asdict(rect),
-                       "resolution": [width, height], "ui_scale": args.ui_scale}}
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+    save_roi_profile(args.output, rect, (width, height), args.ui_scale)
     print(f"roi_profile={args.output.resolve()}")
 
 

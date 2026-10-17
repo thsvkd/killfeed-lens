@@ -200,3 +200,11 @@ def apply_roi_profile(config: AppConfig, path: str | Path) -> None:
     if profile.roi.rect is None:
         raise ValueError("ROI profile must contain a calibrated rect")
     config.roi = profile.roi
+
+
+def save_roi_profile(path: Path, rect: NormalizedRect, resolution: tuple[int, int],
+                     ui_scale: float | None = None) -> None:
+    profile = {"roi": {"profile": path.stem, "rect": asdict(rect),
+                       "resolution": list(resolution), "ui_scale": ui_scale}}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")

@@ -1,20 +1,19 @@
 """Live screen capture inside the GUI process: Pipeline on a worker thread, Tk on the main thread."""
 from __future__ import annotations
 
-import argparse
 import logging
 import os
 import sys
 import threading
-import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
 
 from kfocr.capture.base import CaptureState
 from kfocr.capture.screen import ScreenSource
-from kfocr.config import AppConfig, apply_roi_profile, load_config
+from kfocr.config import AppConfig, apply_roi_profile, load_config, save_roi_profile
 from kfocr.domain.models import NormalizedRect
+from kfocr.ui.gui import RoiBox
 from kfocr.ui.sidecar import EventSink
 
 LOG = logging.getLogger("kfocr.live")
@@ -83,7 +82,7 @@ _STATE = {CaptureState.HEALTHY: "캡처 중", CaptureState.DEGRADED: "캡처 불
 
 
 class LiveCapture:
-    """Start/stop/recalibrate from the Tk thread; `status` and `roi` are read by the GUI poll."""
+    """Start/stop/recalibrate from the Tk thread; `status`, `roi` and `box` are used by the GUI poll."""
 
     def __init__(self, root: tk.Tk, sink: EventSink, base: Path, roi_profile: Path | None = None):
         self.root, self.sink, self.base, self.roi_profile = root, sink, base, roi_profile
@@ -93,6 +92,7 @@ class LiveCapture:
         self.idle = "캡처 대기"
         self.error: str | None = None
         self._thread: threading.Thread | None = None
+        self.box = RoiBox(root, self._confirmed, self.start)  # Esc: restart with the old ROI
 
     @property
     def status(self) -> str:
@@ -111,12 +111,16 @@ class LiveCapture:
         LOG.info(POLICY)
         self.start()
         if self.roi is None and self.error is None and messagebox.askokcancel(
-                "ROI 보정", "킬피드 영역(ROI)이 아직 보정되지 않았습니다.\n\n확인을 누르면 화면을 캡처합니다. "
-                "게임 화면에서 킬피드 영역을 드래그한 뒤 Enter(취소: Esc)를 누르세요.\n\n" + POLICY,
+                "ROI 보정", "킬피드 영역(ROI)이 아직 보정되지 않았습니다.\n\n확인을 누르면 영역 창이 뜹니다. "
+                "테두리를 끌어 크기를, 안쪽을 끌어 위치를 킬피드에 맞춘 뒤 Enter(취소: Esc)를 누르세요.\n\n"
+                + POLICY,
                 parent=self.root):
             self.recalibrate()
 
     def start(self) -> None:
+        if self._thread and self._thread.is_alive():  # stop() timed out; two cameras would clash
+            self.error = "이전 캡처가 아직 종료되지 않았습니다. 잠시 후 다시 시도하세요"
+            return
         self.error = None
         try:
             config = live_config(self.base, self.roi_profile)
@@ -126,8 +130,9 @@ class LiveCapture:
             return
         self.config, self.roi = config, config.roi.rect
         if self.roi is None:
-            self.idle = "ROI 보정 필요: 'ROI 다시 보정'을 누르세요"
+            self.idle = "ROI 보정 필요: 'ROI 조정'을 누르세요"
             return
+        self.box.show(self.roi)
         self.source = _LiveScreenSource(config.capture.monitor, config.capture.sample_fps)
         self._thread = threading.Thread(target=self._work, args=(config, self.source),
                                         name="kfocr-live", daemon=True)
@@ -159,22 +164,31 @@ class LiveCapture:
                 LOG.warning("live capture did not stop within %ss", timeout)
 
     def recalibrate(self) -> None:
-        from kfocr.cli import _calibrate
-
+        """Stop capture and open the ROI box; Enter saves it and restarts, Esc keeps the old ROI."""
         self.stop()
-        monitor = self.config.capture.monitor if self.config else 0
+        if self.config and self.config.capture.monitor != 0:
+            # ponytail: the box is placed and normalized on Tk's primary screen; map dxcam's output
+            # rect onto the virtual desktop if capturing another monitor ever matters.
+            messagebox.showwarning("ROI 보정", "영역 창은 주 모니터 기준입니다. capture.monitor가 0이 "
+                                   "아니면 ROI가 어긋날 수 있습니다.", parent=self.root)
+        self.box.edit(self.roi)
+
+    def toggle_box(self) -> None:
+        if self.box.editing:
+            self.box.cancel()  # restarts with the old ROI, which shows it again
+            self.box.hide()
+        elif self.box.visible:
+            self.box.hide()
+        elif self.roi:
+            self.box.show(self.roi)
+
+    def _confirmed(self, rect: NormalizedRect) -> None:
         output = self.base / "roi.yaml"
-        self.root.withdraw()  # the screenshot must show the game, not this window
-        self.root.update()
-        time.sleep(0.3)
         try:
-            _calibrate(argparse.Namespace(image=None, video=None, monitor=monitor, rect=None,
-                                          ui_scale=None, output=output))
+            save_roi_profile(output, rect, self.box.screen)
             self.roi_profile = output
             LOG.info("roi profile saved: %s", output.resolve())
-        except Exception as exc:
-            LOG.warning("calibration failed: %s", exc)
+        except OSError as exc:
+            LOG.warning("roi profile not saved: %s", exc)
             messagebox.showwarning("ROI 보정", f"ROI를 저장하지 않았습니다: {exc}", parent=self.root)
-        finally:
-            self.root.deiconify()
         self.start()
