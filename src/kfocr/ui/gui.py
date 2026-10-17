@@ -690,6 +690,10 @@ class App:
                 tk.Button(bar, text=text, command=command, bg=LINE, fg=TEXT, bd=0, padx=14, pady=5,
                           activebackground=FAINT, activeforeground=TEXT, font=_f(12),
                           cursor="hand2").pack(side="right", padx=(0, 10), pady=8)
+            self.track = tk.Button(bar, command=live.toggle_tracking, bg=LINE, fg=TEXT, bd=0,
+                                   padx=14, pady=5, activebackground=FAINT, activeforeground=TEXT,
+                                   font=_f(12), cursor="hand2")
+            self.track.pack(side="right", padx=(0, 10), pady=8)
         self.status = tk.Label(bar, bg=PANEL, fg=TEXT, font=_f(11))
         self.status.pack(side="right", padx=4)
         self.canvas = tk.Canvas(root, bg=BG, highlightthickness=0)
@@ -777,6 +781,10 @@ class App:
         self.led.tick(now)
         if self.live and self.status["text"] != self.live.status:
             self.status.configure(text=self.live.status, fg=KILLC if self.live.error else TEXT)
+        if self.live:
+            text = "킬피드 추적 끄기" if self.live.tracking else "킬피드 추적 켜기"
+            if self.track["text"] != text:
+                self.track.configure(text=text)
         if self.hotkey.pressed.is_set():
             self.hotkey.pressed.clear()
             self.toggle_overlay()

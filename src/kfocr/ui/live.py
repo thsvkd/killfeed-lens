@@ -91,6 +91,7 @@ class LiveCapture:
         self.source: _LiveScreenSource | None = None
         self.idle = "캡처 대기"
         self.error: str | None = None
+        self.tracking = True
         self._thread: threading.Thread | None = None
         self.box = RoiBox(root, self._confirmed, self.start)  # Esc: restart with the old ROI
 
@@ -133,6 +134,9 @@ class LiveCapture:
             self.idle = "ROI 보정 필요: 'ROI 조정'을 누르세요"
             return
         self.box.show(self.roi)
+        if not self.tracking:  # ROI confirmed/cancelled while off: keep it off
+            self.idle = "추적 꺼짐"
+            return
         self.source = _LiveScreenSource(config.capture.monitor, config.capture.sample_fps)
         self._thread = threading.Thread(target=self._work, args=(config, self.source),
                                         name="kfocr-live", daemon=True)
@@ -162,6 +166,17 @@ class LiveCapture:
             self._thread.join(timeout)
             if self._thread.is_alive():
                 LOG.warning("live capture did not stop within %ss", timeout)
+
+    def toggle_tracking(self) -> None:
+        """Off ends the capture session (no frames read); on starts a new one. Teams are kept."""
+        self.tracking = not self.tracking
+        if not self.tracking:
+            self.stop()
+            self.idle = "추적 꺼짐"
+        elif self.box.editing:
+            self.idle = "캡처 대기"  # Enter on the ROI box starts it
+        else:
+            self.start()
 
     def recalibrate(self) -> None:
         """Stop capture and open the ROI box; Enter saves it and restarts, Esc keeps the old ROI."""

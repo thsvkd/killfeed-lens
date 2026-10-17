@@ -21,3 +21,26 @@ def test_roi_box_edges_resize_and_interior_moves_within_the_screen() -> None:
     assert drag_box(box, "n", 0, -500, SCREEN) == (100, 0, 200, 200)
     rect = box_to_rect((1747, 1148, 813, 292), SCREEN)  # flush with the bottom-right corner
     assert rect.x + rect.w <= 1 and rect.y + rect.h <= 1
+
+
+def test_tracking_off_ends_capture_and_roi_edits_keep_it_off(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from kfocr.config import save_roi_profile
+    from kfocr.domain.models import NormalizedRect
+    from kfocr.ui.live import LiveCapture
+
+    save_roi_profile(tmp_path / "roi.yaml", NormalizedRect(0.68, 0.0, 0.31, 0.2), (1920, 1080))
+    calls: list[str] = []
+    live = LiveCapture.__new__(LiveCapture)  # no Tk: the box and the capture are stubbed
+    live.base, live.roi_profile, live._thread, live.error, live.tracking = tmp_path, None, None, None, True
+    live.box = SimpleNamespace(editing=False, show=lambda _r: calls.append("show"))
+    live.alive_box = SimpleNamespace(editing=False, hide=lambda: None)
+    live.stop = lambda: calls.append("stop")  # type: ignore[method-assign]
+    live.toggle_tracking()
+    assert not live.tracking and calls == ["stop"] and live.status == "추적 꺼짐"
+    live.start()  # what Enter/Esc on the ROI box call: the ROI is shown, capture stays off
+    assert calls == ["stop", "show"] and live._thread is None and live.roi is not None
+    live.box.editing = True
+    live.toggle_tracking()  # on while the box is being edited: Enter will start it
+    assert live.tracking and live._thread is None and live.status == "캡처 대기"
