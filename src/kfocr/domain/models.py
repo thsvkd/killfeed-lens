@@ -49,6 +49,21 @@ class OCRToken:
     bbox: BBox
 
 
+@dataclass(frozen=True)
+class AliveCount:
+    """A confirmed reading of the HUD, independent of killfeed death events."""
+
+    count: int
+    frame_seq: int
+    observed_at_ns: int
+
+    def __post_init__(self) -> None:
+        if type(self.count) is not int or not 0 <= self.count <= 100:
+            raise ValueError("Alive count must be an integer in [0, 100]")
+        if self.frame_seq < 0 or self.observed_at_ns < 0:
+            raise ValueError("Alive count frame and timeline must be nonnegative")
+
+
 class VisualKind(StrEnum):
     TEXT = "text"
     ICON = "icon"

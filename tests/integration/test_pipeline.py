@@ -180,3 +180,69 @@ def test_ocr_failures_do_not_reemit_persistent_row(tmp_path):
                        icons=Icons(), sink=sink).run()
     assert session.metadata["performance"]["ocr_errors"] == 2
     assert len(sink.events) == 1
+
+
+@pytest.mark.parametrize("feed_fails", [False, True])
+def test_hud_count_reaches_gui_and_jsonl_even_with_static_or_failing_killfeed(tmp_path, feed_fails):
+    import io
+    import queue
+
+    from kfocr.pipeline import Pipeline
+    from kfocr.ui.gui import GuiSink, event_from_row
+    from kfocr.ui.sidecar import JsonlSink, MultiSink
+    from kfocr.ui.teams import Ledger
+
+    class HUDText(Text):
+        def __init__(self):
+            super().__init__(fail_calls=range(1, 100) if feed_fails else ())
+            self.digits = iter(["96", "96", "95", "95", "96", "96"] + ["96"] * 30)
+
+        def read_lines(self, images):
+            return [(next(self.digits), 0.99)]
+
+    config = setup(tmp_path)
+    config.roi.rect = NormalizedRect(0, 0, 0.7, 1)
+    config.roi.alive_rect = NormalizedRect(0.8, 0, 0.2, 0.2)
+    events = queue.Queue()
+    output = tmp_path / "events.jsonl"
+    jsonl = JsonlSink(output)
+    try:
+        session = Pipeline(config, Frames(), recognizer=HUDText(), icons=Icons(),
+                           sink=MultiSink(GuiSink(events), jsonl)).run()
+    finally:
+        jsonl.close()
+    # Exercise the same mixed stream consumer as `gui --jsonl`.
+    import json
+
+    ledger, counts = Ledger(teams=25), []
+    for line in io.StringIO(output.read_text(encoding="utf-8")):
+        record = event_from_row(json.loads(line))
+        from kfocr.domain.models import AliveCount
+
+        if isinstance(record, AliveCount):
+            counts.append(record.count)
+            ledger.observe_alive_count(record)
+        else:
+            ledger.apply(record)
+    assert counts[:3] == [96, 95, 96]
+    assert ledger.players_left == 96
+    assert len(ledger.recent) == (0 if feed_fails else 1)
+    assert events.qsize() == len(output.read_text(encoding="utf-8").splitlines())
+    assert session.metadata["first_observed_alive"] == 96
+    assert session.metadata["last_observed_alive"] == 96
+
+
+def test_hud_ocr_failures_do_not_suppress_killfeed_events(tmp_path):
+    from kfocr.pipeline import Pipeline
+
+    class BrokenHUD(Text):
+        def read_lines(self, images):
+            raise RuntimeError("HUD recognition failed")
+
+    config, sink = setup(tmp_path), Sink()
+    config.roi.alive_rect = NormalizedRect(0.8, 0, 0.2, 0.2)
+    session = Pipeline(config, Frames(), recognizer=BrokenHUD(), icons=Icons(), sink=sink).run()
+    assert len(sink.events) == 1
+    assert session.metadata["performance"]["alive_ocr_errors"] > 0
+    assert session.metadata["performance"]["ocr_errors"] == 0
+    assert "first_observed_alive" not in session.metadata

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Protocol, TextIO
 
-from kfocr.domain.models import ConfirmedEvent
+from kfocr.domain.models import AliveCount, ConfirmedEvent
 
 
 class EventSink(Protocol):
@@ -30,6 +31,10 @@ class ConsoleSink:
               f"{actor} -> {victim} conf={event.confidence_total:.2f}",
               file=self.stream, flush=True)
 
+    def publish_alive_count(self, reading: AliveCount) -> None:
+        seconds = max(0, (reading.observed_at_ns - self.origin_ns) / 1e9)
+        print(f"{seconds:09.3f} [ALIVE  ] {reading.count}", file=self.stream, flush=True)
+
 
 class JsonlSink:
     def __init__(self, path: str | Path):
@@ -43,6 +48,10 @@ class JsonlSink:
         self._stream.write(json.dumps(serialize_event(event), ensure_ascii=False) + "\n")
         self._stream.flush()
 
+    def publish_alive_count(self, reading: AliveCount) -> None:
+        self._stream.write(json.dumps({"type": "alive_count", **asdict(reading)}) + "\n")
+        self._stream.flush()
+
     def close(self) -> None:
         self._stream.close()
 
@@ -54,3 +63,9 @@ class MultiSink:
     def publish(self, event: ConfirmedEvent) -> None:
         for sink in self.sinks:
             sink.publish(event)
+
+    def publish_alive_count(self, reading: AliveCount) -> None:
+        for sink in self.sinks:
+            publish = getattr(sink, "publish_alive_count", None)
+            if publish is not None:
+                publish(reading)

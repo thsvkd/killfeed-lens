@@ -55,6 +55,8 @@ def _parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--video", type=Path, help="Calibrate from a frame of a recording")
     calibrate.add_argument("--at", type=float, default=0, help="Video time in seconds (with --video)")
     calibrate.add_argument("--rect", nargs=4, type=float, metavar=("X", "Y", "W", "H"))
+    calibrate.add_argument("--alive-rect", nargs=4, type=float, metavar=("X", "Y", "W", "H"),
+                           help="Normalized ROI containing only the HUD alive-count digits")
     calibrate.add_argument("--output", type=Path, default=Path("data/roi.yaml"))
     calibrate.add_argument("--ui-scale", type=float)
     validate = commands.add_parser("validate")
@@ -261,7 +263,10 @@ def _calibrate(args) -> None:
         rect = NormalizedRect(x / width, y / height, w / width, h / height)
     if args.ui_scale is not None and not 1 <= args.ui_scale <= 1000:
         raise ValueError("UI scale must be in [1, 1000]")
-    save_roi_profile(args.output, rect, (width, height), args.ui_scale)
+    previous = load_config(args.output if args.output.exists() else None).roi
+    alive_rect = NormalizedRect(*args.alive_rect) if args.alive_rect else previous.alive_rect
+    ui_scale = args.ui_scale if args.ui_scale is not None else previous.ui_scale
+    save_roi_profile(args.output, rect, (width, height), ui_scale, alive_rect=alive_rect)
     print(f"roi_profile={args.output.resolve()}")
 
 

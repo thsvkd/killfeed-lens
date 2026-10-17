@@ -24,6 +24,7 @@ class ROIConfig:
     rect: NormalizedRect | None = None
     ui_scale: float | None = None
     resolution: tuple[int, int] | None = None
+    alive_rect: NormalizedRect | None = None
 
 
 @dataclass
@@ -180,11 +181,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                     # Paths written in a config file are relative to that file, not the cwd.
                     values[key] = str(Path(path).resolve().parent / values[key])
             if section == "roi":
-                if values.get("rect") is not None:
-                    try:
-                        values["rect"] = NormalizedRect(**values["rect"])
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError("Invalid normalized ROI") from exc
+                for key in ("rect", "alive_rect"):
+                    if values.get(key) is not None:
+                        try:
+                            values[key] = NormalizedRect(**values[key])
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(f"Invalid normalized ROI: {key}") from exc
                 if values.get("resolution") is not None:
                     try:
                         values["resolution"] = tuple(values["resolution"])
@@ -203,8 +205,11 @@ def apply_roi_profile(config: AppConfig, path: str | Path) -> None:
 
 
 def save_roi_profile(path: Path, rect: NormalizedRect, resolution: tuple[int, int],
-                     ui_scale: float | None = None) -> None:
+                     ui_scale: float | None = None, *,
+                     alive_rect: NormalizedRect | None = None) -> None:
     profile = {"roi": {"profile": path.stem, "rect": asdict(rect),
                        "resolution": list(resolution), "ui_scale": ui_scale}}
+    if alive_rect is not None:
+        profile["roi"]["alive_rect"] = asdict(alive_rect)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")

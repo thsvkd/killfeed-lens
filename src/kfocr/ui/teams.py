@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from kfocr.domain.models import ConfirmedEvent, EventType
+from kfocr.domain.models import AliveCount, ConfirmedEvent, EventType
 from kfocr.domain.tracker import name_key, same_teammate
 
 SQUAD_SIZE = 4
@@ -97,6 +97,12 @@ class Ledger:
         self.last_ns = 0
         self.last_at = 0.0  # time.monotonic() of the latest event, for UI highlighting
         self._team_of: dict[str, int] = {}
+        self.alive_count: AliveCount | None = None
+        self.alive_count_at = 0.0
+
+    def observe_alive_count(self, reading: AliveCount) -> None:
+        self.alive_count = reading
+        self.alive_count_at = time.monotonic()
 
     # --- lookup -------------------------------------------------------------------------
     def team_of(self, name: str | None, team: int | None) -> int | None:
@@ -220,6 +226,8 @@ class Ledger:
 
     @property
     def players_left(self) -> int:
+        if self.alive_count is not None:
+            return self.alive_count.count
         seen = self._known()
         unseen = max(0, (self.start_teams or 0) - len(seen)) * self.squad_size
         return sum(t.remaining for t in seen) + unseen
@@ -234,6 +242,10 @@ class Ledger:
 
     @property
     def basis(self) -> str:
+        if self.alive_count is not None:
+            age = int(max(0, time.monotonic() - self.alive_count_at))
+            freshness = f" ({age}초 전 관측)" if age >= 5 else ""
+            return f"전체 인원: 화면 숫자{freshness} · 팀별 인원·남은 팀: 추정"
         if self.start_teams:
             return f"시작 {self.start_teams}팀 x {self.squad_size}명 가정"
         return f"관측된 {len(self._known())}팀 기준 (미관측 인원은 생존 가정)"

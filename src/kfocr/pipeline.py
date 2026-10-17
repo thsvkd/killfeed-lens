@@ -95,6 +95,8 @@ class Pipeline:
                             "confirmed_events": 0, "candidate_reject_count": 0,
                             "dropped_frames": 0, "sink_errors": 0, "black_frames": 0,
                             "queue_depth_max": 0}
+        self.performance.update(alive_ocr_calls=0, alive_ocr_errors=0)
+        self._alive_ms: deque[float] = deque(maxlen=10000)
         self._ocr_ms: deque[float] = deque(maxlen=10000)
         self._confirm_ms: deque[float] = deque(maxlen=10000)
         self._db_ms: deque[float] = deque(maxlen=10000)
@@ -151,6 +153,7 @@ class Pipeline:
         from kfocr.domain.parser import EventParser
         from kfocr.domain.tracker import TemporalTracker
         from kfocr.storage.db import EventStore
+        from kfocr.vision.alive import AliveCountReader
         from kfocr.vision.badges import mask_badges, read_badges
         from kfocr.vision.change import EdgeChangeDetector
         from kfocr.vision.icons import TemplateIconRecognizer, mask_icons
@@ -177,9 +180,13 @@ class Pipeline:
         store = self.store or EventStore(self.config.storage.sqlite_path)
         detector = EdgeChangeDetector(self.config.vision.change_threshold)
         assembler, parser = RowAssembler(), EventParser()
+        alive_reader = AliveCountReader(self.config.confidence.confirmed_min,
+                                       self.config.tracker.evidence_frames,
+                                       self.config.tracker.evidence_window_ms)
         session = None
         frames = None
         last_infer_ns: int | None = None
+        last_alive_ns: int | None = None
         last_heartbeat_ns: int | None = None
         heartbeat_errors = 0
         interval_ms, refresh_ms, _ = inference_timing_ms(self.config.capture, self.config.tracker)
@@ -227,6 +234,8 @@ class Pipeline:
                                           {"model_manifest": manifest, "platform": platform.platform(),
                                            "ui_scale": self.config.roi.ui_scale,
                                            "roi": asdict(self.config.roi.rect),
+                                           "alive_roi": (asdict(self.config.roi.alive_rect)
+                                                         if self.config.roi.alive_rect else None),
                                            "last_observed_at_utc": start_wall.isoformat(),
                                            "ranked_live_usage_approved": False})
                         store.start_session(session)
@@ -260,6 +269,32 @@ class Pipeline:
                         if max_frames is not None and self.performance["capture_frames"] >= max_frames:
                             break
                         continue
+                    # HUD changes independently of the killfeed; its failures must not drop rows.
+                    if self.config.roi.alive_rect is not None and (
+                            last_alive_ns is None or end_ns - last_alive_ns >= interval_ms * 1e6):
+                        last_alive_ns = end_ns
+                        started = time.perf_counter()
+                        self.performance["alive_ocr_calls"] += 1
+                        try:
+                            reading = alive_reader.read(
+                                crop_roi(frame.image_bgr, self.config.roi.alive_rect),
+                                recognizer, frame.seq, end_ns)
+                        except Exception:
+                            reading = None
+                            self.performance["alive_ocr_errors"] += 1
+                            log_event("alive_ocr.error", frame_seq=frame.seq)
+                        self._alive_ms.append((time.perf_counter() - started) * 1000)
+                        if reading is not None:
+                            session.metadata.setdefault("first_observed_alive", reading.count)
+                            session.metadata["last_observed_alive"] = reading.count
+                            session.metadata["last_alive_observed_at_ns"] = reading.observed_at_ns
+                            publish_alive = getattr(sink, "publish_alive_count", None)
+                            if publish_alive is not None:
+                                try:
+                                    publish_alive(reading)
+                                except Exception:
+                                    self.performance["sink_errors"] += 1
+                                    log_event("sidecar.error")
                     roi = crop_roi(frame.image_bgr, self.config.roi.rect)
                     elapsed = float("inf") if last_infer_ns is None else end_ns - last_infer_ns
                     interval, refresh_ns = interval_ms * 1e6, refresh_ms * 1e6
@@ -333,6 +368,7 @@ class Pipeline:
             if session is not None:
                 duration = max(1e-9, time.perf_counter() - start_perf)
                 for label, values in (("ocr_latency_ms", self._ocr_ms),
+                                      ("alive_ocr_latency_ms", self._alive_ms),
                                       ("confirmation_latency_ms", self._confirm_ms),
                                       ("db_write_latency_ms", self._db_ms)):
                     self.performance[label] = {

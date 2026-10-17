@@ -20,7 +20,7 @@ from pathlib import Path
 from tkinter import font as tkfont
 from typing import TYPE_CHECKING, Literal, TextIO
 
-from kfocr.domain.models import ConfirmedEvent, EventType, NormalizedRect
+from kfocr.domain.models import AliveCount, ConfirmedEvent, EventType, NormalizedRect
 from kfocr.ui.teams import Ledger, Status, Team, make_event
 from kfocr.vision.roi import pixel_rect
 
@@ -178,9 +178,11 @@ def draw_overlay(c: tk.Canvas, led: Ledger, w: int, now: float) -> int:
     foot = top + max(len(shown), 1) * row + (20 if len(live) > len(shown) else 0)
     h = foot + 54
     _t(c, 14, 28, led.players_left, 34, TEXT, bold=True, num=True)
-    _t(c, 14, 51, "남은 인원", 10, DIM)
+    stale = led.alive_count is not None and now - led.alive_count_at >= 5
+    label = ("인원 · 마지막 관측" if stale else "남은 인원 · 화면") if led.alive_count else "남은 인원 · 추정"
+    _t(c, 14, 51, label, 10, DIM)
     _t(c, w - 14, 25, led.teams_left, 24, TEXT, anchor="e", bold=True, num=True)
-    _t(c, w - 14, 51, "남은 팀", 10, DIM, anchor="e")
+    _t(c, w - 14, 51, "남은 팀 · 추정", 10, DIM, anchor="e")
     c.create_line(0, top - 2, w, top - 2, fill=LINE)
     if not shown:
         _t(c, w / 2, top + 12, "대기 중…", 12, DIM, anchor="center")
@@ -217,9 +219,9 @@ def draw_cards(c: tk.Canvas, led: Ledger, w: int, now: float) -> int:
     pad, gap, card_h = 18, 12, 118
     _t(c, pad, 32, led.players_left, 38, TEXT, bold=True, num=True)
     x = c.bbox(c.find_all()[-1])[2] + 8
-    _t(c, x, 40, "명 남음", 13, DIM)
-    _t(c, x + 100, 32, led.teams_left, 38, TEXT, bold=True, num=True)
-    _t(c, c.bbox(c.find_all()[-1])[2] + 8, 40, "팀 남음", 13, DIM)
+    _t(c, x, 40, "명 남음 · 화면" if led.alive_count else "명 남음 · 추정", 13, DIM)
+    _t(c, x + 145, 32, led.teams_left, 38, TEXT, bold=True, num=True)
+    _t(c, c.bbox(c.find_all()[-1])[2] + 8, 40, "팀 남음 · 추정", 13, DIM)
     _t(c, w - pad, 24, f"킬 {led.total_kills} · 기절 중 {led.knocked_now}", 12, DIM, anchor="e")
     _t(c, w - pad, 46, led.basis, 11, DIM, anchor="e")
     _legend(c, pad + 4, 72)
@@ -256,11 +258,14 @@ def draw_cards(c: tk.Canvas, led: Ledger, w: int, now: float) -> int:
 class GuiSink:
     """EventSink that is safe to call from the pipeline worker thread."""
 
-    def __init__(self, events: queue.Queue[ConfirmedEvent]):
+    def __init__(self, events: queue.Queue[ConfirmedEvent | AliveCount]):
         self.events = events
 
     def publish(self, event: ConfirmedEvent) -> None:
         self.events.put(event)
+
+    def publish_alive_count(self, reading: AliveCount) -> None:
+        self.events.put(reading)
 
 
 def simulate_match(seed: int = 7, teams: int = 25) -> Iterator[tuple[float, ConfirmedEvent]]:
@@ -348,7 +353,9 @@ def simulate_match(seed: int = 7, teams: int = 25) -> Iterator[tuple[float, Conf
         yield ev(delay, kind, (abadge, hit[1]), (vbadge, victim))
 
 
-def event_from_row(row: dict) -> ConfirmedEvent:
+def event_from_row(row: dict) -> ConfirmedEvent | AliveCount:
+    if row.get("type") == "alive_count":
+        return AliveCount(row["count"], int(row["frame_seq"]), int(row["observed_at_ns"]))
     return make_event(row.get("killer_name"), row.get("killer_team"), row.get("victim_name"),
                       row.get("victim_team"), EventType(row["event_type"]),
                       int(row["observed_at_ns"]), row.get("weapon_label"), row.get("headshot"))
@@ -375,7 +382,11 @@ def tail_jsonl(sink: GuiSink, stream: TextIO, stop: threading.Event) -> None:
         line, buffer = buffer.strip(), ""
         try:
             if line:
-                sink.publish(event_from_row(json.loads(line)))
+                record = event_from_row(json.loads(line))
+                if isinstance(record, AliveCount):
+                    sink.publish_alive_count(record)
+                else:
+                    sink.publish(record)
         except (ValueError, KeyError, TypeError):
             continue  # skip malformed rows
 
@@ -493,6 +504,23 @@ def clear_of(box: tuple[float, float, float, float], roi: tuple[float, float, fl
     return int(a), int(b)
 
 
+def clear_of_rois(box: tuple[float, float, float, float],
+                  rois: list[tuple[float, float, float, float]],
+                  screen: tuple[float, float], gap: int = 8) -> tuple[int, int]:
+    """Find a position that avoids every ROI, including when moving past one meets another."""
+    x, y, w, h = box
+    xs, ys = {x}, {y}
+    for rx, ry, rw, rh in rois:
+        xs.update((rx - w - gap, rx + rw + gap))
+        ys.update((ry - h - gap, ry + rh + gap))
+    spots = [(a, b) for a in xs for b in ys
+             if 0 <= a <= screen[0] - w and 0 <= b <= screen[1] - h
+             and all(a >= rx + rw or a + w <= rx or b >= ry + rh or b + h <= ry
+                     for rx, ry, rw, rh in rois)]
+    a, b = min(spots or [(x, y)], key=lambda p: abs(p[0] - x) + abs(p[1] - y))
+    return int(a), int(b)
+
+
 # --- ROI box: a live selection frame over the game ------------------------------------------
 GRIP, ROI_MIN = 8, 24  # px: edge band that resizes; smallest box side
 ROI_DEFAULT = NormalizedRect(0.68, 0.0, 0.31, 0.2)  # PUBG killfeed corner, top-right
@@ -541,8 +569,10 @@ class RoiBox:
     """
 
     def __init__(self, root: tk.Misc, on_confirm: Callable[[NormalizedRect], None],
-                 on_cancel: Callable[[], None]):
+                 on_cancel: Callable[[], None], *, label: str = "킬피드",
+                 default_rect: NormalizedRect = ROI_DEFAULT):
         self.on_confirm, self.on_cancel = on_confirm, on_cancel
+        self.label, self.default_rect = label, default_rect
         self.editing, self.focused = False, False
         self.box, self._press = (0, 0, 1, 1), (0, 0, (0, 0, 1, 1), "")
         top = self.top = tk.Toplevel(root)
@@ -573,7 +603,7 @@ class RoiBox:
         self.editing = True
         self.top.attributes("-transparentcolor", "")
         self.top.attributes("-alpha", 0.55)
-        self._show(rect or ROI_DEFAULT)
+        self._show(rect or self.default_rect)
         self.top.focus_force()
 
     def show(self, rect: NormalizedRect) -> None:
@@ -654,7 +684,7 @@ class RoiBox:
         c.create_line(0, h / 2, w, h / 2, fill=line)
         for hx, hy in ((0, 0), (w, 0), (0, h), (w, h)):
             c.create_rectangle(hx - GRIP, hy - GRIP, hx + GRIP, hy + GRIP, fill=line, outline="")
-        hint = ("Enter 확정 · Esc 취소" if self.focused else "클릭하면 Enter/Esc 사용") + \
+        hint = self.label + " · " + ("Enter 확정 · Esc 취소" if self.focused else "클릭하면 Enter/Esc 사용") + \
             " · 테두리: 크기 · 안쪽: 이동"
         _t(c, w / 2, 16, hint, 12, TEXT, anchor="center", bold=True)
         _t(c, w / 2, h - 14, f"{w}x{h}", 11, TEXT, anchor="center", num=True)
@@ -663,7 +693,7 @@ class RoiBox:
 class App:
     """Cards window (main) + optional always-on-top overlay, both drawn from one Ledger."""
 
-    def __init__(self, root: tk.Tk, events: queue.Queue[ConfirmedEvent], ledger: Ledger,
+    def __init__(self, root: tk.Tk, events: queue.Queue[ConfirmedEvent | AliveCount], ledger: Ledger,
                  hotkey: Hotkey, overlay: bool, roi: NormalizedRect | None = None,
                  live: LiveCapture | None = None):
         families = set(tkfont.families(root))
@@ -686,10 +716,16 @@ class App:
         tk.Label(bar, text=f"{keys} · PUBG는 '전체 창 모드(테두리 없음)'에서만 오버레이가 보임",
                  bg=PANEL, fg=DIM, font=_f(11)).pack(side="left", padx=4)
         if live:
-            for text, command in (("ROI 표시/숨김", live.toggle_box), ("ROI 조정", live.recalibrate)):
-                tk.Button(bar, text=text, command=command, bg=LINE, fg=TEXT, bd=0, padx=14, pady=5,
+            roi_bar = tk.Frame(root, bg=PANEL)
+            roi_bar.pack(fill="x")
+            for text, command in (("킬피드 ROI 조정", live.recalibrate),
+                                  ("생존 인원 ROI 조정", live.recalibrate_alive),
+                                  ("ROI 표시/숨김", live.toggle_box)):
+                tk.Button(roi_bar, text=text, command=command, bg=LINE, fg=TEXT, bd=0, padx=14, pady=5,
                           activebackground=FAINT, activeforeground=TEXT, font=_f(12),
-                          cursor="hand2").pack(side="right", padx=(0, 10), pady=8)
+                          cursor="hand2").pack(side="left", padx=(10, 0), pady=(0, 8))
+            tk.Label(roi_bar, text="생존 인원은 숫자만 지정 · Enter 확정 / Esc 취소",
+                     bg=PANEL, fg=DIM, font=_f(11)).pack(side="left", padx=12, pady=(0, 8))
             self.track = tk.Button(bar, command=live.toggle_tracking, bg=LINE, fg=TEXT, bd=0,
                                    padx=14, pady=5, activebackground=FAINT, activeforeground=TEXT,
                                    font=_f(12), cursor="hand2")
@@ -735,9 +771,9 @@ class App:
         """Size the overlay and push it off the killfeed ROI (ROI is normalized to the captured
         monitor; assumed to be Tk's primary screen)."""
         sw, sh = self.top.winfo_screenwidth(), self.top.winfo_screenheight()
-        if r := (self.live.roi if self.live else self.roi):
-            self._pos = clear_of((*self._pos, OVERLAY_W, h), (r.x * sw, r.y * sh, r.w * sw,
-                                                              r.h * sh), (sw, sh))
+        rects = [self.live.roi, self.live.alive_roi] if self.live else [self.roi]
+        rois = [(r.x * sw, r.y * sh, r.w * sw, r.h * sh) for r in rects if r is not None]
+        self._pos = clear_of_rois((*self._pos, OVERLAY_W, h), rois, (sw, sh))
         self.top.geometry(f"{OVERLAY_W}x{h}+{self._pos[0]}+{self._pos[1]}")
 
     @property
@@ -773,7 +809,11 @@ class App:
         changed = False
         try:
             while True:
-                self.led.apply(self.events.get_nowait())
+                record = self.events.get_nowait()
+                if isinstance(record, AliveCount):
+                    self.led.observe_alive_count(record)
+                else:
+                    self.led.apply(record)
                 changed = True
         except queue.Empty:
             pass
@@ -793,6 +833,8 @@ class App:
             hide_from_capture(self.top)  # needs the mapped hwnd, so not in set_overlay
         if int(now) != self._second and self.live:
             self.live.box.keep_on_top()
+            self.live.alive_box.keep_on_top()
+            self._place(self._overlay_h or 200)
             if self.live.roi != self.roi:  # re-calibrated: push the overlay off the new ROI
                 self.roi = self.live.roi
                 self._place(self._overlay_h or 200)
@@ -810,7 +852,7 @@ def run(*, overlay: bool, demo: bool, jsonl: TextIO | None, speed: float = 1.0,
     if sys.platform == "win32":  # dxcam turns this on at the first grab anyway; Tk must agree from
         ctypes.windll.user32.SetProcessDPIAware()  # the start so ROI pixels match captured ones
     root = tk.Tk()
-    events: queue.Queue[ConfirmedEvent] = queue.Queue()
+    events: queue.Queue[ConfirmedEvent | AliveCount] = queue.Queue()
     sink, stop, hotkey = GuiSink(events), threading.Event(), Hotkey()
     hotkey.start()
     ledger = Ledger(teams=teams or (25 if demo else None), scale=speed if demo else 1.0)

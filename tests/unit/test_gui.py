@@ -23,6 +23,16 @@ def test_roi_box_edges_resize_and_interior_moves_within_the_screen() -> None:
     assert rect.x + rect.w <= 1 and rect.y + rect.h <= 1
 
 
+def test_overlay_placement_keeps_both_rois_uncovered():
+    from kfocr.ui.gui import clear_of_rois
+
+    rois = [(1747, 0, 804, 292), (2280, 300, 264, 60)]
+    x, y = clear_of_rois((2280, 80, 264, 400), rois, SCREEN)
+    assert 0 <= x <= 2560 - 264 and 0 <= y <= 1440 - 400
+    for rx, ry, rw, rh in rois:
+        assert x >= rx + rw or x + 264 <= rx or y >= ry + rh or y + 400 <= ry
+
+
 def test_tracking_off_ends_capture_and_roi_edits_keep_it_off(tmp_path) -> None:
     from types import SimpleNamespace
 

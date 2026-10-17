@@ -61,3 +61,32 @@ def test_config_hash_ignores_output_locations_but_changes_with_inference_policy(
     assert a.config_hash == b.config_hash
     b.confidence.confirmed_min = 0.9
     assert a.config_hash != b.config_hash
+
+
+def test_two_roi_profile_roundtrip_and_legacy_profile(tmp_path):
+    from kfocr.config import AppConfig, apply_roi_profile, load_config, save_roi_profile
+    from kfocr.domain.models import NormalizedRect
+
+    path = tmp_path / "roi.yaml"
+    feed = NormalizedRect(0.6, 0.1, 0.4, 0.2)
+    alive = NormalizedRect(0.92, 0.01, 0.04, 0.04)
+    save_roi_profile(path, feed, (1920, 1080), 100, alive_rect=alive)
+    config = AppConfig()
+    apply_roi_profile(config, path)
+    assert config.roi.rect == feed and config.roi.alive_rect == alive
+    assert config.roi.resolution == (1920, 1080) and config.roi.ui_scale == 100
+    with_alive_hash = config.config_hash
+    save_roi_profile(path, feed, (1920, 1080), 100)
+    legacy = load_config(path)
+    assert legacy.roi.rect == feed and legacy.roi.alive_rect is None
+    assert legacy.config_hash != with_alive_hash
+
+
+@pytest.mark.parametrize("rect", ["{x: 0.9, y: 0, w: 0.2, h: 0.1}", "[0, 0, 1, 1]"])
+def test_invalid_alive_roi_is_rejected(tmp_path, rect):
+    from kfocr.config import load_config
+
+    path = tmp_path / "roi.yaml"
+    path.write_text(f"roi:\n  alive_rect: {rect}\n")
+    with pytest.raises(ValueError, match="ROI"):
+        load_config(path)

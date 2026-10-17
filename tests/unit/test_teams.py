@@ -6,6 +6,23 @@ from kfocr.ui.teams import KNOCK_TIMEOUT_NS, Ledger, Status, make_event
 K, F, D = EventType.KNOCK, EventType.FINISH, EventType.KILL
 
 
+def test_hud_count_overrides_squad_assumptions_without_double_subtracting_kills(monkeypatch):
+    from kfocr.domain.models import AliveCount
+
+    clock = [10.0]
+    monkeypatch.setattr("kfocr.ui.teams.time.monotonic", lambda: clock[0])
+    ledger = Ledger(teams=25)
+    ledger.observe_alive_count(AliveCount(96, 0, 0))
+    ledger.apply(make_event("a", 7, "b", 25))
+    assert ledger.players_left == 96
+    assert ledger.teams[25].remaining == 3  # HUD count does not invent team membership.
+    ledger.observe_alive_count(AliveCount(95, 1, 400_000_000))
+    assert ledger.players_left == 95
+    assert "화면" in ledger.basis and "추정" in ledger.basis
+    clock[0] = 20.0
+    assert "10초 전" in ledger.basis  # lost HUD is labelled, not presented as current.
+
+
 def squad_down(ledger: Ledger, team: int = 25, count: int = 4, kind: EventType = D) -> None:
     for i in range(count):
         ledger.apply(make_event("a1", 7, f"b{i}", team, kind))

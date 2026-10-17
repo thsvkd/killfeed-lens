@@ -25,6 +25,23 @@ def test_cli_help_and_numeric_calibration(tmp_path, capsys):
     assert "roi" in capsys.readouterr().out
 
 
+def test_cli_calibrates_both_rois_and_keeps_the_hud_when_recalibrating_feed(tmp_path):
+    from kfocr.cli import main
+    from kfocr.config import load_config
+    from kfocr.domain.models import NormalizedRect
+
+    image = tmp_path / "screen.png"
+    cv2.imwrite(str(image), np.full((100, 200, 3), 60, dtype=np.uint8))
+    profile = tmp_path / "roi.yaml"
+    command = ["calibrate", "--image", str(image), "--rect", "0.5", "0.1", "0.5", "0.5",
+               "--output", str(profile)]
+    assert main(command + ["--alive-rect", "0.9", "0.01", "0.05", "0.04"]) == 0
+    assert main(command) == 0
+    config = load_config(profile)
+    assert config.roi.rect == NormalizedRect(0.5, 0.1, 0.5, 0.5)
+    assert config.roi.alive_rect == NormalizedRect(0.9, 0.01, 0.05, 0.04)
+
+
 def test_cli_prints_absolute_output_and_reports_missing_input_location(tmp_path, monkeypatch, capsys):
     from kfocr.cli import main
 
