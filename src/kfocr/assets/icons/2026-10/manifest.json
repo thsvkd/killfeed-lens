@@ -1,0 +1,7 @@
+{
+  "manifest_version": "2026-10",
+  "icons": [
+    {"label": "kill_marker", "file": "kill_marker.png", "threshold": 0.70},
+    {"label": "knock_marker", "file": "knock_marker.png", "threshold": 0.70}
+  ]
+}

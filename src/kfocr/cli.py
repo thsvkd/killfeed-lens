@@ -94,7 +94,49 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--labels", type=Path, help="Default: <candidates>/labels.json")
     build.add_argument("--output", type=Path, required=True, help="e.g. data/icons/2026-10")
     build.add_argument("--threshold", type=float, default=0.92)
+    gui = commands.add_parser("gui", help="Per-team kills/knocks/remaining players window")
+    gui.add_argument("--overlay", action="store_true",
+                     help="Start with the always-on-top overlay shown (toggle: Ctrl+Alt+O). "
+                          "Needs PUBG in borderless/windowed fullscreen, not exclusive fullscreen")
+    feed = gui.add_mutually_exclusive_group(required=True)
+    feed.add_argument("--demo", action="store_true", help="Play a scripted fake match")
+    feed.add_argument("--jsonl", type=Path, help="Replay, then follow, a --jsonl events file")
+    feed.add_argument("--live", action="store_true",
+                      help="Capture the screen in this window (data: data/, or %%LOCALAPPDATA%%"
+                           "\\killfeed-lens when installed); guides ROI calibration on first run")
+    gui.add_argument("--roi-profile", type=Path,
+                     help="Keep the overlay off this killfeed ROI (e.g. data/roi.yaml); "
+                          "with --live also the capture ROI")
+    gui.add_argument("--speed", type=float, default=1.0, help="Demo playback speed multiplier")
+    gui.add_argument("--teams", type=int, help="Starting team count; unseen teams count as full squads")
+    gui.add_argument("--verbose", action="store_true")
+    gui.add_argument("--exit-after", type=float, help=argparse.SUPPRESS)
     return parser
+
+
+def _gui(args) -> None:
+    from kfocr.ui.gui import run
+
+    if args.speed <= 0 or (args.teams is not None and args.teams <= 0):
+        raise ValueError("--speed and --teams must be positive")
+    roi = None
+    if args.roi_profile:
+        config = AppConfig()
+        apply_roi_profile(config, args.roi_profile)
+        roi = config.roi.rect
+    live_dir = None
+    if args.live:
+        from kfocr.ui.live import data_dir, start_file_log
+
+        live_dir = data_dir()
+        start_file_log(live_dir)
+    stream = args.jsonl.open(encoding="utf-8") if args.jsonl else None
+    try:
+        run(overlay=args.overlay, demo=args.demo, jsonl=stream, speed=args.speed, teams=args.teams,
+            exit_after=args.exit_after, roi=roi, live_dir=live_dir, roi_profile=args.roi_profile)
+    finally:
+        if stream:
+            stream.close()
 
 
 def _templates(args, config: AppConfig) -> None:
@@ -339,6 +381,9 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(args.verbose)
     store = None
     try:
+        if args.command == "gui":
+            _gui(args)
+            return 0
         config = _config(args)
         if args.command in ("run", "replay"):
             _capture(args, config)
