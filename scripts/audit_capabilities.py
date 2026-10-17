@@ -37,7 +37,7 @@ def main() -> int:
                         names = [node.func.attr]
                 for name in names:
                     if name in FORBIDDEN_MODULES | FORBIDDEN_CALLS:
-                        findings.append({"file": str(path.relative_to(args.root)),
+                        findings.append({"file": path.relative_to(args.root).as_posix(),
                                          "line": getattr(node, "lineno", 0), "capability": name})
     project = args.root / "pyproject.toml"
     if project.exists():

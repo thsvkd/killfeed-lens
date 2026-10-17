@@ -14,6 +14,7 @@ dependencies = ["numpy>=1.26", "opencv-python>=4.10,<5", "httpx>=0.27,<1", "PyYA
 ocr = ["rapidocr-onnxruntime>=1.4,<2"]
 windows = ["dxcam>=0.3,<1; sys_platform == 'win32'"]
 dev = ["pytest>=8,<10", "ruff>=0.9", "mypy>=1.14", "types-PyYAML>=6"]
+package = ["pyinstaller>=6.10,<7"]
 
 [project.scripts]
 kfocr = "kfocr.cli:main"

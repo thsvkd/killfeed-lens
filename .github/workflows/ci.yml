@@ -1,16 +1,72 @@
-name: checks
-on: [push, pull_request]
+name: CI
+
+on:
+  workflow_call:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      # uv's managed CPython ships tkinter; the runner's system Python may not (gui tests import it).
+      UV_PYTHON_PREFERENCE: only-managed
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      - run: uv sync --locked --extra dev --extra ocr
-      - run: uv run pytest -q
-      - run: uv run ruff check src tests scripts
-      - run: uv run mypy src scripts
-      - run: uv run python scripts/audit_capabilities.py
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev --extra ocr --extra windows
+
+      - name: Lint
+        run: uv run ruff check src tests scripts
+
+      - name: Test
+        run: uv run pytest -q
+
+      # pipeline.py's fcntl branch is POSIX-only, so mypy is checked against Linux.
+      - name: Type check
+        if: runner.os == 'Linux'
+        run: uv run mypy src scripts
+
+      - name: Capability audit
+        run: uv run python scripts/audit_capabilities.py
+
+  smoke-packaged:
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      # Builds the onedir app, portable exe and setup.exe, and smokes each packaged executable.
+      - name: Package and smoke
+        shell: pwsh
+        run: .\script\package.ps1
