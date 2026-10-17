@@ -40,6 +40,9 @@ def test_cli_calibrates_both_rois_and_keeps_the_hud_when_recalibrating_feed(tmp_
     config = load_config(profile)
     assert config.roi.rect == NormalizedRect(0.5, 0.1, 0.5, 0.5)
     assert config.roi.alive_rect == NormalizedRect(0.9, 0.01, 0.05, 0.04)
+    profile.write_text("roi: {rect: broken}\n", encoding="utf-8")
+    assert main(command) == 0  # a broken profile is overwritten, not a dead end
+    assert load_config(profile).roi.rect == NormalizedRect(0.5, 0.1, 0.5, 0.5)
 
 
 def test_cli_prints_absolute_output_and_reports_missing_input_location(tmp_path, monkeypatch, capsys):

@@ -31,6 +31,7 @@ def test_overlay_placement_keeps_both_rois_uncovered():
     assert 0 <= x <= 2560 - 264 and 0 <= y <= 1440 - 400
     for rx, ry, rw, rh in rois:
         assert x >= rx + rw or x + 264 <= rx or y >= ry + rh or y + 400 <= ry
+    assert clear_of_rois((3000, 80, 264, 400), rois, SCREEN) == (3000, 80)  # clear on monitor 2: kept
 
 
 def test_tracking_off_ends_capture_and_roi_edits_keep_it_off(tmp_path) -> None:

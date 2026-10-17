@@ -263,7 +263,10 @@ def _calibrate(args) -> None:
         rect = NormalizedRect(x / width, y / height, w / width, h / height)
     if args.ui_scale is not None and not 1 <= args.ui_scale <= 1000:
         raise ValueError("UI scale must be in [1, 1000]")
-    previous = load_config(args.output if args.output.exists() else None).roi
+    try:  # keep the other ROI and the UI scale, but a broken file must not block re-calibration
+        previous = load_config(args.output if args.output.exists() else None).roi
+    except ValueError:
+        previous = AppConfig().roi
     alive_rect = NormalizedRect(*args.alive_rect) if args.alive_rect else previous.alive_rect
     ui_scale = args.ui_scale if args.ui_scale is not None else previous.ui_scale
     save_roi_profile(args.output, rect, (width, height), ui_scale, alive_rect=alive_rect)

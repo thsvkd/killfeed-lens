@@ -115,17 +115,15 @@ class LiveCapture:
         """First run: no ROI yet -> guide calibration, then capture."""
         LOG.info(POLICY)
         self.start()
-        if (self.roi is None or self.alive_roi is None) and self.error is None and messagebox.askokcancel(
+        # only without a killfeed ROI: upgraders add the alive ROI from its button, not every launch
+        if self.roi is None and self.error is None and messagebox.askokcancel(
                 "ROI 보정", "킬피드와 전체 생존 인원에 각각 영역(ROI)을 지정합니다.\n\n"
                 "킬피드는 표시되는 행 전체를, 생존 인원은 숫자만 포함하도록 맞추세요. "
                 "테두리를 끌어 크기를, 안쪽을 끌어 위치를 조정한 뒤 Enter로 확정합니다(취소: Esc).\n\n"
                 + POLICY,
                 parent=self.root):
             self._setup_both = True
-            if self.roi is None:
-                self.recalibrate()
-            else:
-                self.recalibrate_alive()
+            self.recalibrate()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():  # stop() timed out; two cameras would clash

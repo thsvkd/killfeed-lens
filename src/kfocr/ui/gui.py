@@ -509,6 +509,8 @@ def clear_of_rois(box: tuple[float, float, float, float],
                   screen: tuple[float, float], gap: int = 8) -> tuple[int, int]:
     """Find a position that avoids every ROI, including when moving past one meets another."""
     x, y, w, h = box
+    if all(x >= rx + rw or x + w <= rx or y >= ry + rh or y + h <= ry for rx, ry, rw, rh in rois):
+        return int(x), int(y)  # clear already: leave it, even on another monitor
     xs, ys = {x}, {y}
     for rx, ry, rw, rh in rois:
         xs.update((rx - w - gap, rx + rw + gap))
@@ -702,6 +704,7 @@ class App:
         _FAM["num"] = next((n for n in ("Bahnschrift", "Consolas") if n in families), _FAM["ui"])
         self.root, self.events, self.led, self.hotkey = root, events, ledger, hotkey
         self.roi, self.live = roi, live
+        self._rois: tuple[NormalizedRect | None, NormalizedRect | None] = (None, None)
         self.dirty, self._second, self._overlay_h = True, -1, 0
         root.title("killfeed-lens · 팀 현황")
         root.configure(bg=BG)
@@ -834,9 +837,9 @@ class App:
         if int(now) != self._second and self.live:
             self.live.box.keep_on_top()
             self.live.alive_box.keep_on_top()
-            self._place(self._overlay_h or 200)
-            if self.live.roi != self.roi:  # re-calibrated: push the overlay off the new ROI
-                self.roi = self.live.roi
+            rois = (self.live.roi, self.live.alive_roi)
+            if rois != self._rois:  # re-calibrated: push the overlay off the new ROIs
+                self._rois = rois
                 self._place(self._overlay_h or 200)
         animating = any(now - t.touched < FLASH_S for t in self.led.teams.values() if t.touched)
         if changed or animating or self.dirty or int(now) != self._second:
