@@ -9,6 +9,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import cv2
@@ -53,6 +54,8 @@ def _parser() -> argparse.ArgumentParser:
     _common(calibrate)
     calibrate.add_argument("--monitor", type=int, default=0)
     calibrate.add_argument("--image", type=Path, help="Calibrate from an existing screenshot")
+    calibrate.add_argument("--video", type=Path, help="Calibrate from a frame of a recording")
+    calibrate.add_argument("--at", type=float, default=0, help="Video time in seconds (with --video)")
     calibrate.add_argument("--rect", nargs=4, type=float, metavar=("X", "Y", "W", "H"))
     calibrate.add_argument("--output", type=Path, default=Path("data/roi.yaml"))
     calibrate.add_argument("--ui-scale", type=float)
@@ -75,7 +78,55 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("--output", type=Path, required=True)
     sessions = commands.add_parser("sessions", help="List local capture sessions")
     _common(sessions)
+    templates = commands.add_parser("templates", help="Collect and build icon templates")
+    actions = templates.add_subparsers(dest="action", required=True)
+    harvest = actions.add_parser("harvest", help="Cluster icon candidates from a recording or the screen")
+    _common(harvest)
+    harvest.add_argument("video", type=Path, nargs="?", help="Omit to harvest live from the screen")
+    harvest.add_argument("--monitor", type=int)
+    harvest.add_argument("--roi-profile", type=Path)
+    harvest.add_argument("--roi", nargs=4, type=float, metavar=("X", "Y", "W", "H"))
+    harvest.add_argument("--fps", type=float, default=4, help="Sampled frames per second")
+    harvest.add_argument("--output", type=Path, default=Path("data/icon-candidates"))
+    build = actions.add_parser("build", help="Write a template manifest from labels.json")
+    _common(build)
+    build.add_argument("candidates", type=Path, help="harvest output directory")
+    build.add_argument("--labels", type=Path, help="Default: <candidates>/labels.json")
+    build.add_argument("--output", type=Path, required=True, help="e.g. data/icons/2026-10")
+    build.add_argument("--threshold", type=float, default=0.92)
     return parser
+
+
+def _templates(args, config: AppConfig) -> None:
+    from kfocr import templates
+
+    if args.action == "build":
+        manifest = templates.build(args.candidates, args.labels or args.candidates / "labels.json",
+                                   args.output, args.threshold)
+        print(f"icon_template_dir={manifest.parent.resolve()}")
+        return
+    if config.roi.rect is None:
+        raise ValueError("Calibrate an ROI first: kfocr calibrate; then supply --roi-profile data/roi.yaml")
+    from kfocr.vision.text import RapidOCRRecognizer
+
+    source: Any
+    if args.video is None:
+        if sys.platform != "win32":
+            raise ValueError("Live screen harvest requires Windows; pass a recording instead")
+        from kfocr.capture.screen import ScreenSource
+
+        source = ScreenSource(config.capture.monitor, args.fps)
+        print("화면에서 템플릿 후보를 수집합니다. Ctrl+C로 종료하면 결과를 저장합니다.", file=sys.stderr)
+    else:
+        from kfocr.capture.replay import ReplaySource
+
+        source = ReplaySource(args.video, args.fps)
+    source.start()
+    try:
+        clusters = templates.harvest(source.frames(), config.roi.rect, RapidOCRRecognizer(), args.output)
+    finally:
+        source.stop()
+    print(f"clusters={len(clusters)} labels={(args.output / 'labels.json').resolve()}")
 
 
 def _config(args) -> AppConfig:
@@ -100,6 +151,7 @@ def _capture(args, config: AppConfig) -> None:
         raise ValueError("Calibrate an ROI first: kfocr calibrate; then supply --roi-profile data/roi.yaml")
     if args.max_frames is not None and args.max_frames <= 0:
         raise ValueError("--max-frames must be positive")
+    source: Any
     if args.command == "run":
         if sys.platform != "win32":
             raise ValueError("Live screen capture requires Windows; use replay on this platform")
@@ -117,7 +169,8 @@ def _capture(args, config: AppConfig) -> None:
         if started is not None and started.tzinfo is None:
             raise ValueError("--started-at must include a timezone, for example 2026-10-01T12:00:00Z")
     if config.vision.icon_template_dir is None:
-        print("검증된 아이콘 템플릿이 없어 이벤트 종류는 unknown으로 처리합니다.", file=sys.stderr)
+        print("아이콘 템플릿이 없어 이벤트를 확정하지 않습니다. kfocr templates harvest로 수집하세요.",
+              file=sys.stderr)
     from kfocr.pipeline import Pipeline
     from kfocr.ui.sidecar import ConsoleSink, JsonlSink, MultiSink
 
@@ -127,6 +180,7 @@ def _capture(args, config: AppConfig) -> None:
     try:
         session = Pipeline(config, source, sink=sink, started_at_utc=started).run(args.max_frames)
         print(f"session_id={session.session_id}")
+        print(f"sqlite_path={Path(config.storage.sqlite_path).resolve()}")
     finally:
         if jsonl:
             jsonl.close()
@@ -136,7 +190,14 @@ def _calibrate(args) -> None:
     if args.image:
         image = cv2.imread(str(args.image))
         if image is None:
-            raise ValueError("Cannot read calibration image")
+            raise ValueError(f"Cannot read calibration image: {args.image.resolve()} (cwd: {Path.cwd()})")
+    elif args.video:
+        capture = cv2.VideoCapture(str(args.video))
+        capture.set(cv2.CAP_PROP_POS_MSEC, args.at * 1000)
+        ok, image = capture.read()
+        capture.release()
+        if not ok:
+            raise ValueError(f"Cannot read a frame at {args.at}s from {args.video.resolve()} (cwd: {Path.cwd()})")
     else:
         from kfocr.capture.screen import ScreenSource
 
@@ -164,7 +225,7 @@ def _calibrate(args) -> None:
                        "resolution": [width, height], "ui_scale": args.ui_scale}}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
-    print(f"roi_profile={args.output}")
+    print(f"roi_profile={args.output.resolve()}")
 
 
 class ValidationPendingError(ValueError):
@@ -283,6 +344,8 @@ def main(argv: list[str] | None = None) -> int:
             _capture(args, config)
         elif args.command == "calibrate":
             _calibrate(args)
+        elif args.command == "templates":
+            _templates(args, config)
         else:
             from kfocr.storage.db import EventStore
 
@@ -319,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
                 if store.get_session(args.session_id) is None:
                     raise ValueError("Unknown session ID")
                 export_events(store.list_events(args.session_id), args.output, args.format)
-                print(f"export={args.output}")
+                print(f"export={args.output.resolve()}")
         return 0
     except KeyboardInterrupt:
         print("Capture stopped; session marked aborted.", file=sys.stderr)
@@ -334,6 +397,8 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, RuntimeError, OSError) as exc:
         # API client uses safe errors; never print generic transport exception request objects.
         message = str(exc)
+        if isinstance(exc, FileNotFoundError) and exc.filename:
+            message = f"File not found: {Path(exc.filename).resolve()} (cwd: {Path.cwd()})"
         secret = os.environ.get("PUBG_API_KEY")
         if secret:
             message = message.replace(secret, "[REDACTED]")

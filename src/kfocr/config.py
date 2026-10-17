@@ -89,6 +89,8 @@ class AppConfig:
         # Output locations do not affect extraction; benchmark temp paths must be reproducible.
         values["storage"].pop("sqlite_path")
         values["debug"].pop("artifact_dir")
+        # Template location is machine-specific; template files and thresholds are in the model hash.
+        values["vision"].pop("icon_template_dir")
         raw = json.dumps(values, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -150,6 +152,13 @@ def _integer(value, lower: int, upper: int, label: str) -> None:
         raise ValueError(f"Invalid integer limit: {label}")
 
 
+_CONFIG_PATH_KEYS = {
+    "storage": ("sqlite_path",),
+    "debug": ("artifact_dir",),
+    "vision": ("icon_template_dir",),
+}
+
+
 def load_config(path: str | Path | None = None) -> AppConfig:
     config = AppConfig()
     if path is not None:
@@ -166,6 +175,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             if not isinstance(values, dict) or set(values) - {item.name for item in fields(target)}:
                 raise ValueError(f"Invalid configuration keys in {section}")
             values = dict(values)
+            for key in _CONFIG_PATH_KEYS.get(section, ()):
+                if isinstance(values.get(key), str) and values[key]:
+                    # Paths written in a config file are relative to that file, not the cwd.
+                    values[key] = str(Path(path).resolve().parent / values[key])
             if section == "roi":
                 if values.get("rect") is not None:
                     try:

@@ -25,6 +25,21 @@ def test_cli_help_and_numeric_calibration(tmp_path, capsys):
     assert "roi" in capsys.readouterr().out
 
 
+def test_cli_prints_absolute_output_and_reports_missing_input_location(tmp_path, monkeypatch, capsys):
+    from kfocr.cli import main
+
+    image = tmp_path / "screen.png"
+    cv2.imwrite(str(image), np.full((100, 200, 3), 60, dtype=np.uint8))
+    monkeypatch.chdir(tmp_path)
+    assert main(["calibrate", "--image", "screen.png", "--rect", "0.5", "0", "0.5", "0.5",
+                 "--output", "out/roi.yaml"]) == 0
+    assert f"roi_profile={(tmp_path / 'out' / 'roi.yaml').resolve()}" in capsys.readouterr().out
+    assert main(["sessions", "--config", "data/config.yaml"]) == 2
+    err = capsys.readouterr().err
+    assert str((tmp_path / "data" / "config.yaml").resolve()) in err
+    assert f"cwd: {tmp_path}" in err
+
+
 def test_replay_requires_explicit_roi_without_creating_database(tmp_path, capsys):
     from kfocr.cli import main
 

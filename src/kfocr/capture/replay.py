@@ -29,7 +29,9 @@ class ReplaySource:
         capture = cv2.VideoCapture(str(self.path))
         if not capture.isOpened():
             capture.release()
-            raise RuntimeError(f"Unable to open replay video: {self.path}")
+            raise RuntimeError(
+                f"Unable to open replay video: {self.path.resolve()} (cwd: {Path.cwd()})"
+            )
         self._capture = capture
         self._running = True
 

@@ -59,5 +59,5 @@ PRD/SPEC의 자료 없이 구현 가능한 코드 경로를 구현했습니다. 
 | PUBG API 인증·실제 경기 자동 매칭 | HTTP fixture 검증 | API key와 실제 종료 경기 |
 | live 배포 정책 승인 | 승인 없음 | KRAFTON/PUBG 서면 확인 |
 
-실제 템플릿이 없으면 분류는 `unknown`입니다. 현재 자료만으로 위 수치나 정책 승인을
+실제 템플릿이 없으면 분류는 `unknown`이고, 아이콘 없는 행은 확정되지 않습니다. 현재 자료만으로 위 수치나 정책 승인을
 주장하지 않습니다. P1/P2의 headshot/weapon 세분화, Overwolf, desktop viewer 등은 별도 범위입니다.

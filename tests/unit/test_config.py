@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 
@@ -33,12 +35,29 @@ def test_config_rejects_invalid_limits_and_plaintext_secrets(tmp_path, text):
         load_config(path)
 
 
+def test_config_relative_paths_resolve_next_to_config_file(tmp_path, monkeypatch):
+    from kfocr.config import load_config
+
+    (tmp_path / "data").mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    path = tmp_path / "data" / "config.yaml"
+    path.write_text("storage: {sqlite_path: db.sqlite3}\ndebug: {artifact_dir: sessions}\n"
+                    "vision: {icon_template_dir: icons/2026-10}\n")
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    config = load_config(Path("..") / "data" / "config.yaml")
+    base = (tmp_path / "data").resolve()
+    assert Path(config.storage.sqlite_path) == base / "db.sqlite3"
+    assert Path(config.debug.artifact_dir) == base / "sessions"
+    assert Path(config.vision.icon_template_dir) == base / "icons" / "2026-10"
+
+
 def test_config_hash_ignores_output_locations_but_changes_with_inference_policy():
     from kfocr.config import AppConfig
 
     a, b = AppConfig(), AppConfig()
     b.storage.sqlite_path = "/tmp/random-benchmark-location/events.db"
     b.debug.artifact_dir = "/tmp/random-output"
+    b.vision.icon_template_dir = "/elsewhere/icons/2026-10"
     assert a.config_hash == b.config_hash
     b.confidence.confirmed_min = 0.9
     assert a.config_hash != b.config_hash

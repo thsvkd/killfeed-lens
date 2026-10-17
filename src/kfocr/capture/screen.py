@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterator
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -16,6 +16,30 @@ class _Backend(Protocol):
     def stop(self) -> None: ...
 
 
+def _patch_dxcam_double_release() -> None:
+    # ponytail: dxcam 0.3.0 calls Release() on COM pointers and then drops them, so comtypes
+    # releases them again and the process dies on stop, resize and access-loss recovery
+    # (alt-tab, fullscreen, UAC). Only drop the references; delete when dxcam fixes it.
+    from importlib.metadata import version
+
+    if version("dxcam") != "0.3.0":
+        return
+    from dxcam.core.dxgi_duplicator import DXGIDuplicator
+    from dxcam.core.stagesurf import StageSurface
+
+    def duplicator_release(self: Any) -> None:
+        if self.duplicator is not None:
+            self.release_frame()
+            self.duplicator = None
+
+    def stagesurf_release(self: Any) -> None:
+        self.width = self.height = 0
+        self.texture = self.interface = None
+
+    DXGIDuplicator.release = duplicator_release
+    StageSurface.release = stagesurf_release
+
+
 class _DXCamBackend:
     def __init__(self, monitor: int) -> None:
         try:
@@ -24,6 +48,7 @@ class _DXCamBackend:
             raise RuntimeError(
                 "Screen capture requires the Windows extra: pip install 'killfeed-lens[windows]'"
             ) from exc
+        _patch_dxcam_double_release()
         self._camera = dxcam.create(
             device_idx=0,
             output_idx=monitor,
@@ -35,12 +60,7 @@ class _DXCamBackend:
         return self._camera.grab(new_frame_only=False)
 
     def stop(self) -> None:
-        try:
-            self._camera.stop()
-        finally:
-            release = getattr(self._camera, "release", None)
-            if release is not None:
-                release()
+        self._camera.release()
 
 
 class ScreenSource:

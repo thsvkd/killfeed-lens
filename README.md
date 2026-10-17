@@ -35,6 +35,7 @@ Desktop Duplication 어댑터로 구현했습니다.
 
 ```bash
 uv run kfocr calibrate --image screenshot.png --output data/roi.yaml --ui-scale 100
+uv run kfocr calibrate --video match.mp4 --at 330 --output data/roi.yaml
 uv run kfocr calibrate --image screenshot.png --rect 0.64 0.03 0.35 0.30 --output data/roi.yaml
 uv run kfocr replay match.mp4 --roi-profile data/roi.yaml --max-speed --jsonl data/events.jsonl
 ```
@@ -59,6 +60,8 @@ uv run kfocr replay match.mp4 --roi 0.64 0.03 0.35 0.30 --realtime
 현재 저장소에는 실제 PUBG 영상에서 검증한 kill/knock 템플릿이 없습니다.
 템플릿이 없거나 분류가 불확실하면 `unknown`으로 처리합니다. 이름과 시간은 별도로 추적하지만,
 불확실한 이벤트를 강제로 kill로 바꾸지 않습니다.
+아이콘이 검출되지 않은 행은 킬피드 구조 근거가 없으므로 기본 확정 임계치에 도달하지 않습니다.
+따라서 템플릿 없이는 실제 PUBG 킬피드를 확정 이벤트로 기록하지 않습니다.
 
 로컬 템플릿을 사용할 때 config의 `vision.icon_template_dir`를 설정하고 해당 폴더에
 이미지와 `manifest.json`을 둡니다. 종류가 같은 위치에서 충돌하면 `unknown`입니다.
@@ -74,6 +77,35 @@ uv run kfocr replay match.mp4 --roi 0.64 0.03 0.35 0.30 --realtime
 
 이미지는 실제 보정 환경의 아이콘 crop이어야 합니다. 템플릿/threshold는 tuning 데이터에서
 선정하고 holdout 데이터로 평가하세요. 테스트의 합성 아이콘은 제품 모델이 아닙니다.
+
+### 녹화영상에서 템플릿 수집
+
+PUBG 패치로 킬피드 UI가 바뀌면 아래 과정을 반복해 새 템플릿 세트를 만듭니다.
+
+```bash
+uv run kfocr templates harvest match.mp4 --roi-profile data/roi.yaml --output data/icon-candidates
+# 출력 폴더는 새 폴더여야 합니다. 다시 수집할 때는 다른 폴더를 지정하거나 기존 폴더를 지우세요.
+# data/icon-candidates/clusters/<id>/icon.png(아이콘 후보)와 row.png(행 전체)를 보고
+# labels.json에 라벨을 채웁니다. 예: {"c0002": "kill_marker", "c0005": "knock_marker", "c0001": "noise"}
+uv run kfocr templates build data/icon-candidates --output data/icons/2026-10
+```
+
+녹화 파일 없이 Windows 화면에서 바로 수집할 수도 있습니다. 영상 인자를 생략하고 Ctrl+C로 종료하면
+그때까지 모은 후보를 저장합니다. 게임과 동시에 OCR을 실행하므로 `--fps`를 낮게 유지하세요.
+
+```powershell
+uv run kfocr calibrate --monitor 0 --output data/roi.yaml
+uv run kfocr templates harvest --monitor 0 --roi-profile data/roi.yaml --fps 2 --output data/icon-candidates-live
+```
+
+harvest는 OCR로 찾은 행에서 두 이름 사이의 가장 넓은 빈 영역을 잘라 dHash로 군집화합니다.
+실제 PUBG 킬피드에서는 이 영역에 무기·헤드샷 아이콘이 함께 들어가 군집이 잘게 나뉩니다.
+킬/기절은 피해자 이름 바로 앞의 고정 표식(✕, 기어가는 사람)으로 구분되므로, `row.png`에서
+그 표식만 잘라 템플릿으로 사용하세요.
+템플릿이 없어도 동작하며, 결과는 로컬에만 저장됩니다. `row.png`에는 닉네임이 포함됩니다.
+라벨에 `kill`/`knock`이 들어가야 종류로 분류되고, 빈 값·`noise`·`skip`은 제외됩니다.
+OCR이 아이콘을 글자로 잘못 읽으면 잡음 군집이 생기므로 라벨링에서 걸러야 합니다.
+build가 만든 디렉터리를 `vision.icon_template_dir`로 지정하고, 수집에 쓰지 않은 영상으로 평가하세요.
 
 ## Windows 캡처
 
@@ -154,6 +186,13 @@ telemetry:
 이벤트마다 commit합니다. 동일 DB에는 하나의 캡처 파이프라인만 실행합니다. 재시작 시 남아 있는
 `running` 세션을 `crashed`로 복구하며, active writer가 있는 세션은 조회 명령이 종료하지 않습니다.
 config hash에는 출력 파일 경로를 제외해 임시 benchmark 경로로 인한 변화를 방지합니다.
+
+경로 해석 규칙은 다음과 같습니다. 설정 파일 안에 적은 상대 경로(`storage.sqlite_path`,
+`debug.artifact_dir`, `vision.icon_template_dir`)는 현재 작업 디렉터리가 아니라 그 설정 파일이 있는
+디렉터리를 기준으로 해석합니다. 명령줄 인자(`--config`, `--roi-profile`, `--output` 등)의 상대 경로는
+현재 작업 디렉터리를 기준으로 하므로, `data/` 안에서 실행하면 `data/data/`에 저장될 수 있습니다.
+파일을 쓰는 명령은 실제 저장 위치를 절대 경로로 출력하고, 입력 파일이 없으면 시도한 절대 경로와
+현재 작업 디렉터리를 오류 메시지에 함께 표시합니다.
 
 전체 프레임·이벤트 crop은 기본 저장하지 않습니다. `--save-crops` 또는 debug 설정으로
 켜면 `data/sessions/<session-id>/`에 저장합니다. 닉네임 등 민감 정보가 포함될 수 있습니다.
