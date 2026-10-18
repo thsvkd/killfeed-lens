@@ -201,6 +201,56 @@ def test_tracker_suppresses_drifting_spelling_of_an_already_emitted_row() -> Non
     assert {(e.victim_name, e.event_type) for e in emitted} == {("Charlie", EventType.KILL), ("Bravo", EventType.KNOCK)}
 
 
+def test_a_scrolled_row_reread_in_part_is_the_same_kill_but_a_squadmate_is_not() -> None:
+    tracker = TemporalTracker(session_id=uuid4())
+    badged = dict(killer_team=3, victim_team=8)
+    assert tracker.update([event(1, **badged, victim_name="Bravo-Six")], 100_000_000) == []
+    assert len(tracker.update([event(2, **badged, victim_name="Bravo-Six")], 200_000_000)) == 1
+    # The row scrolls down and reads cut short, or with a character glued in: the same kill.
+    for frame, victim in ((5, "Bra"), (8, "Bravo-S1ix")):
+        part = dict(badged, victim_name=victim, visual_fingerprint=f"moved{frame}")
+        assert tracker.update([event(frame, 40, **part)], frame * 100_000_000) == []
+        assert tracker.update([event(frame + 1, 40, **part)], (frame + 1) * 100_000_000) == []
+    # The same killer downing a squadmate on that team is a new kill.
+    mate = dict(badged, victim_name="Charlie", visual_fingerprint="mate")
+    assert tracker.update([event(11, 40, **mate)], 1_100_000_000) == []
+    assert len(tracker.update([event(12, 40, **mate)], 1_200_000_000)) == 1
+
+
+def test_a_victim_badge_read_after_the_row_emitted_fills_the_event_in() -> None:
+    tracker = TemporalTracker(session_id=uuid4())
+    unread = dict(killer_team=3, visual_fingerprint="row")
+    out = [e for f in range(1, 7) for e in tracker.update([event(f, **unread)], f * 100_000_000)]
+    assert len(out) == 1 and out[0].victim_team is None  # waited out its badge wait
+    assert tracker.update([event(7, **unread, victim_team=8)], 700_000_000) == []
+    assert tracker.take_amended() == []  # one read fills nothing
+    assert tracker.update([event(8, **unread, victim_team=8)], 800_000_000) == []
+    fixed = tracker.take_amended()
+    assert [(e.event_id, e.killer_team, e.victim_team) for e in fixed] == [(out[0].event_id, 3, 8)]
+    assert tracker.take_amended() == []
+
+
+def test_an_amended_row_reread_as_it_scrolls_is_still_the_same_kill() -> None:
+    tracker = TemporalTracker(session_id=uuid4())
+    unread = dict(killer_team=3, victim_name="Bravo-Six", visual_fingerprint="row")
+    out = [e for f in range(1, 9) for e in tracker.update(
+        [event(f, **unread, victim_team=8 if f > 6 else None)], f * 100_000_000)]
+    assert len(out) == 1 and tracker.take_amended()[0].victim_team == 8
+    moved = dict(unread, victim_name="Bra", victim_team=8, visual_fingerprint="moved")
+    assert tracker.update([event(12, 40, **moved)], 1_200_000_000) == []
+    assert tracker.update([event(13, 40, **moved)], 1_300_000_000) == []
+
+
+def test_a_short_first_read_does_not_swallow_the_next_squadmate() -> None:
+    tracker = TemporalTracker(session_id=uuid4())
+    badged = dict(killer_team=3, victim_team=8)
+    assert tracker.update([event(1, **badged, victim_name="Kye")], 100_000_000) == []
+    assert len(tracker.update([event(2, **badged, victim_name="Kye")], 200_000_000)) == 1
+    mate = dict(badged, victim_name="Charlie", visual_fingerprint="mate")
+    assert tracker.update([event(30, 40, **mate)], 3_000_000_000) == []
+    assert len(tracker.update([event(31, 40, **mate)], 3_100_000_000)) == 1
+
+
 def test_tracker_keeps_teammates_whose_names_differ_only_by_digits() -> None:
     tracker = TemporalTracker(session_id=uuid4())
     tracker.update([event(1, victim_name="Player1")], 100_000_000)

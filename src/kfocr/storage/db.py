@@ -179,6 +179,14 @@ class EventStore:
                 ),
             )
 
+    def amend_event_teams(self, event: ConfirmedEvent) -> None:
+        """Badges read after the event was stored."""
+        with self._connection:
+            self._connection.execute(
+                "UPDATE events SET killer_team = ?, victim_team = ? WHERE event_id = ?",
+                (event.killer_team, event.victim_team, str(event.event_id)),
+            )
+
     def update_session_metadata(
         self, session_id: UUID | str, metadata: dict[str, Any]
     ) -> None:

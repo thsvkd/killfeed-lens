@@ -18,7 +18,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol, TextIO
+from typing import Any, NamedTuple, Protocol, TextIO
 
 from kfocr.capture.screen import lower_thread_priority
 from kfocr.config import AppConfig, save_roi_profile
@@ -31,6 +31,17 @@ TICK_S = 0.5  # quiet-time housekeeping: knock expiry, capture health
 KEEP_EVENTS = 20
 _HUD_AGE = re.compile(r" \(\d+초 전 관측\)")  # Ledger.basis' live age; the UI renders it from hud.at
 _EOF, _RESET = object(), object()
+MATCH_OVER = "경기 종료 · 다음 경기 대기 중"
+
+
+class _Match(str):
+    """Pipeline.publish_match's state ("ended", "playing", "new") on its way to the main loop."""
+
+
+class _Amended(NamedTuple):
+    """An event already applied whose missing badges were read later."""
+
+    event: ConfirmedEvent
 
 
 # --- snapshot -------------------------------------------------------------------------------
@@ -102,6 +113,12 @@ class _QueueSink:
     def publish_alive_count(self, reading: AliveCount) -> None:
         self.inbox.put(reading)
 
+    def publish_match(self, state: str) -> None:
+        self.inbox.put(_Match(state))
+
+    def publish_amended(self, event: ConfirmedEvent) -> None:
+        self.inbox.put(_Amended(event))
+
 
 class LiveFeed:
     """ui.live.LiveCapture without Tk: Pipeline on a worker thread, ROIs in <base>/roi.yaml."""
@@ -145,6 +162,13 @@ class LiveFeed:
         self.error = None
         try:
             self.config = live_config(self.base, self.roi_profile)
+            res = self.config.roi.resolution
+            if (self.config.roi.rect is not None and self.config.roi.alive_rect is None
+                    and res and abs(res[0] / res[1] - 16 / 9) < 0.02):
+                # The HUD count gives the real player count and the match start/end. The default
+                # box fits PUBG's 16:9 HUD (checked on 2560x1440 recordings); other screens need
+                # the ROI editor, the box could land on another number there.
+                self.config.roi.alive_rect = ALIVE_DEFAULT
         except (ValueError, OSError) as exc:
             LOG.error("live capture setup failed: %s", exc)
             self.error = str(exc)
@@ -268,6 +292,7 @@ class Engine:
         self.led = new_ledger()
         self.tracking, self.editing = True, False
         self.warning: str | None = None
+        self.match_over = False
         self.seq = 0
         self._last: dict | None = None
 
@@ -279,6 +304,8 @@ class Engine:
             return "추적 꺼짐", False
         if self.warning:
             return self.warning, True
+        if self.match_over and not self.feed.error:
+            return MATCH_OVER, False
         return self.feed.status, bool(self.feed.error)
 
     def command(self, cmd: dict) -> None:
@@ -313,10 +340,17 @@ class Engine:
         else:
             self.feed.stop()
             self.feed.load()  # keep the ROIs in the snapshot current while paused
+        self.match_over = False  # a fresh capture says "new" itself if a match starts later
 
     def handle(self, item: object) -> None:
         if item is _RESET:
             self.led = self.new_ledger()
+        elif isinstance(item, _Match):
+            self.match_over = item == "ended"
+            if item == "new":  # the board keeps the last match until the next one starts
+                self.led = self.new_ledger()
+        elif isinstance(item, _Amended):
+            self.led.amend(item.event)
         elif isinstance(item, AliveCount):
             self.led.observe_alive_count(item)
         elif isinstance(item, ConfirmedEvent):

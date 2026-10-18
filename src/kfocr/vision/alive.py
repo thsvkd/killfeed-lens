@@ -20,6 +20,9 @@ class AliveCountReader:
         self._value: int | None = None
         self._times: deque[int] = deque(maxlen=evidence_frames)
         self._last_seq = -1
+        # Last read that saw a number at all, confirmed or not: the HUD is on screen (match
+        # boundaries). Misreads like "G1" for 61 or a low-confidence "90" still count as shown.
+        self.shown_ns: int | None = None
 
     def read(self, image: np.ndarray, recognizer, frame_seq: int,
              observed_at_ns: int) -> AliveCount | None:
@@ -39,6 +42,9 @@ class AliveCountReader:
                 if len(reads) == 1:
                     text, confidence = reads[0]
                     text = text.strip()
+                    # no HUD (lobby, loading, starting island) reads "" or noise below 0.2
+                    if confidence >= 0.5 and re.search(r"[0-9]", text):
+                        self.shown_ns = observed_at_ns
                     if (math.isfinite(confidence) and self.confidence_min <= confidence <= 1
                             and re.fullmatch(r"[0-9]{1,3}", text) and int(text) <= 100):
                         value = int(text)

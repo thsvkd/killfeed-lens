@@ -32,7 +32,17 @@ class PipelineBusyError(RuntimeError):
     pass
 
 
-ALIVE_INTERVAL_MS = 250  # the HUD count changes slowly; keep its OCR off the 30 Hz frame cadence
+ALIVE_INTERVAL_MS = 500  # the HUD count changes slowly; keep its OCR (~25 ms) off the frame cadence
+# The HUD alive count shows from the plane to the end of a match, spectating included (two
+# recordings: never gone over 7 s mid-match), and not in the lobby, loading or on the starting
+# island. Gone this long, the match is over for this player.
+MATCH_ENDED_NS = 45_000_000_000
+# Back from such a gap, it is a new match if the count rose by more than a recall brings back,
+# or if no mid-match alt-tab lasts that long.
+# ponytail: from two recordings; an alt-tab past 3 min splits a match, and requeueing within 3 min
+# after dying at about the next lobby's size merges two. Retune with recorded lobbies.
+NEW_MATCH_RISE = 4
+NEW_MATCH_AWAY_NS = 180_000_000_000
 
 
 def _crop(frame: Frame, rect: NormalizedRect) -> np.ndarray:
@@ -112,7 +122,7 @@ class Pipeline:
                             "confirmed_events": 0, "candidate_reject_count": 0,
                             "dropped_frames": 0, "sink_errors": 0, "black_frames": 0,
                             "queue_depth_max": 0}
-        self.performance.update(alive_ocr_calls=0, alive_ocr_errors=0)
+        self.performance.update(alive_ocr_calls=0, alive_ocr_errors=0, amended_events=0)
         self._alive_ms: deque[float] = deque(maxlen=10000)
         self._ocr_ms: deque[float] = deque(maxlen=10000)
         self._confirm_ms: deque[float] = deque(maxlen=10000)
@@ -203,9 +213,11 @@ class Pipeline:
         store = self.store or EventStore(self.config.storage.sqlite_path)
         detector = EdgeChangeDetector(self.config.vision.change_threshold)
         assembler, parser = RowAssembler(), EventParser()
-        alive_reader = AliveCountReader(self.config.confidence.confirmed_min,
-                                       self.config.tracker.evidence_frames,
-                                       self.config.tracker.evidence_window_ms)
+        # The window must span the evidence reads even when a slow loop stretches them apart.
+        evidence = self.config.tracker.evidence_frames
+        alive_reader = AliveCountReader(self.config.confidence.confirmed_min, evidence,
+                                       max(self.config.tracker.evidence_window_ms,
+                                           2 * ALIVE_INTERVAL_MS * max(1, evidence - 1)))
         session = None
         frames = None
         last_infer_ns: int | None = None
@@ -218,6 +230,36 @@ class Pipeline:
         start_wall = self.started_at_utc or datetime.now(UTC)
         start_perf = time.perf_counter()
         end_ns = 0
+        origin_ns: int | None = None
+        # Match boundaries from the HUD count: one session per match. hud_ns is the last frame the
+        # count showed; while away (back after a gap) it stays there until a sure count judges it.
+        hud_ns: int | None = None
+        last_count: int | None = None
+        away = False
+        commit = _git_commit()
+        match_over = False  # "ended" published for the current absence
+        ended_ns: int | None = None  # set: the next frame closes the session as of this time
+
+        def wall(ns: int) -> datetime:
+            origin = ns if origin_ns is None else origin_ns
+            return start_wall + timedelta(seconds=max(0, (ns - origin) / 1e9))
+
+        def match_end() -> int:
+            """The last frame, or the last HUD count if the match was over by then: the board
+            stays up in the lobby, and the session is the match (a live run's FN count after the
+            player left went 6 -> 0 this way)."""
+            if session is not None and hud_ns is not None and end_ns - hud_ns >= MATCH_ENDED_NS:
+                return max(hud_ns, session.timeline_origin_ns)
+            return end_ns
+
+        def publish_match(state: str) -> None:
+            publish = getattr(sink, "publish_match", None)
+            if publish is not None:
+                try:
+                    publish(state)
+                except Exception:
+                    self.performance["sink_errors"] += 1
+                    log_event("sidecar.error")
 
         def persist():
             for _ in range(len(pending)):
@@ -252,17 +294,28 @@ class Pipeline:
                 for frame in frames:
                     end_ns = frame.captured_at_ns
                     self.performance["capture_frames"] += 1
+                    if origin_ns is None:
+                        origin_ns = end_ns
+                    if session is not None and ended_ns is not None:  # a new match began
+                        persist()
+                        session.status = "completed"
+                        session.ended_at_utc = wall(max(ended_ns, session.timeline_origin_ns))
+                        store.finish_session(session.session_id, session.status, session.ended_at_utc)
+                        store.update_session_metadata(session.session_id, session.metadata)
+                        log_event("match.ended", session_id=session.session_id)
+                        session, ended_ns, last_heartbeat_ns = None, None, None
+                        previous_roi, ocr_failed = None, False
                     if session is None:
-                        session = Session(uuid4(), "screen" if live else "video", start_wall, None,
+                        session = Session(uuid4(), "screen" if live else "video", wall(end_ns), None,
                                           (frame.width, frame.height), self.config.roi.profile,
-                                          __version__, _git_commit(), self.config.config_hash,
+                                          __version__, commit, self.config.config_hash,
                                           manifest_hash, "running", frame.captured_at_ns,
                                           {"model_manifest": manifest, "platform": platform.platform(),
                                            "ui_scale": self.config.roi.ui_scale,
                                            "roi": asdict(self.config.roi.rect),
                                            "alive_roi": (asdict(self.config.roi.alive_rect)
                                                          if self.config.roi.alive_rect else None),
-                                           "last_observed_at_utc": start_wall.isoformat(),
+                                           "last_observed_at_utc": wall(end_ns).isoformat(),
                                            "ranked_live_usage_approved": False})
                         store.start_session(session)
                         self._prune_artifacts(session.session_id)
@@ -276,8 +329,7 @@ class Pipeline:
                                   source=session.source_type)
                     persist()
                     if last_heartbeat_ns is None or end_ns - last_heartbeat_ns >= 1_000_000_000:
-                        observed_wall = start_wall + timedelta(
-                            seconds=max(0, (end_ns - session.timeline_origin_ns) / 1e9))
+                        observed_wall = wall(end_ns)
                         try:
                             store.heartbeat_session(session.session_id, observed_wall)
                         except Exception as exc:
@@ -311,10 +363,37 @@ class Pipeline:
                             self.performance["alive_ocr_errors"] += 1
                             log_event("alive_ocr.error", frame_seq=frame.seq)
                         self._alive_ms.append((time.perf_counter() - started) * 1000)
+                        since = hud_ns if hud_ns is not None else origin_ns or 0
+                        gone = end_ns - since
+                        if alive_reader.shown_ns == end_ns and not away:
+                            if hud_ns is None and gone >= MATCH_ENDED_NS:
+                                # this run's first match after a lobby (the capture restarted
+                                # there): the board may still hold the last one.
+                                # ponytail: a restart mid-match that then sees no HUD for 45 s
+                                # (alt-tabbed) clears that match's board too.
+                                publish_match("new")
+                            if hud_ns is not None and gone >= MATCH_ENDED_NS:
+                                away = True
+                            else:
+                                hud_ns = end_ns
+                        elif hud_ns is not None and not away and not match_over and (
+                                gone >= MATCH_ENDED_NS):
+                            match_over = True
+                            publish_match("ended")
+                        if reading is not None and away:  # judged on a sure count
+                            if gone >= NEW_MATCH_AWAY_NS or last_count is None or (
+                                    reading.count >= last_count + NEW_MATCH_RISE):
+                                ended_ns = hud_ns
+                                publish_match("new")
+                            else:
+                                publish_match("playing")
+                            away, hud_ns, match_over = False, end_ns, False
                         if reading is not None:
-                            session.metadata.setdefault("first_observed_alive", reading.count)
-                            session.metadata["last_observed_alive"] = reading.count
-                            session.metadata["last_alive_observed_at_ns"] = reading.observed_at_ns
+                            last_count = reading.count
+                            if ended_ns is None:  # else it is the next match's count already
+                                session.metadata.setdefault("first_observed_alive", reading.count)
+                                session.metadata["last_observed_alive"] = reading.count
+                                session.metadata["last_alive_observed_at_ns"] = reading.observed_at_ns
                             publish_alive = getattr(sink, "publish_alive_count", None)
                             if publish_alive is not None:
                                 try:
@@ -364,6 +443,23 @@ class Pipeline:
                             self._confirm_ms.append((event.confirmed_at_ns - event.observed_at_ns) / 1e6)
                             log_event("tracker.confirmed", event_id=event.event_id)
                         persist()
+                        for event in tracker.take_amended():  # badges read after it went out
+                            self.performance["amended_events"] += 1
+                            log_event("tracker.amended", event_id=event.event_id)
+                            for i, (queued, attempts) in enumerate(pending):  # not stored yet
+                                if queued.event_id == event.event_id:
+                                    pending[i] = (event, attempts)
+                            try:
+                                store.amend_event_teams(event)
+                            except Exception:
+                                log_event("storage.error", operation="amend")
+                            publish_amended = getattr(sink, "publish_amended", None)
+                            if publish_amended is not None:
+                                try:
+                                    publish_amended(event)
+                                except Exception:
+                                    self.performance["sink_errors"] += 1
+                                    log_event("sidecar.error")
                     if max_frames is not None and self.performance["capture_frames"] >= max_frames:
                         break
                 if session is None:
@@ -373,14 +469,12 @@ class Pipeline:
                         break
                     persist()
                 session.status = "completed"
-                session.ended_at_utc = start_wall + timedelta(
-                    seconds=max(0, (end_ns - session.timeline_origin_ns) / 1e9))
+                session.ended_at_utc = wall(match_end())
                 store.finish_session(session.session_id, session.status, session.ended_at_utc)
         except BaseException:
             if session is not None:
                 session.status = "aborted"
-                session.ended_at_utc = start_wall + timedelta(
-                    seconds=max(0, (end_ns - session.timeline_origin_ns) / 1e9))
+                session.ended_at_utc = wall(match_end())
                 try:
                     store.finish_session(session.session_id, "aborted", session.ended_at_utc)
                 except Exception:

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import numpy as np
@@ -284,6 +284,141 @@ def test_hud_ocr_failures_do_not_suppress_killfeed_events(tmp_path):
     assert session.metadata["performance"]["alive_ocr_errors"] > 0
     assert session.metadata["performance"]["ocr_errors"] == 0
     assert "first_observed_alive" not in session.metadata
+
+
+class Match(Frames):
+    """(start_s, frames, hud) spans 100 ms a frame; hud 0 = gone, 1 = first count, 2 = back."""
+
+    def __init__(self, spans):
+        super().__init__()
+        self.spans = spans
+
+    def frames(self):
+        seq = 0
+        for start_s, count, shown in self.spans:
+            for i in range(count):
+                image = np.full((100, 320, 3), 40, dtype=np.uint8)
+                image[10:30, 20:70] = 255
+                image[10:30, 130:190] = 255
+                image[0:20, 256:320] = 41 + shown  # what HUDText answers for this frame
+                ns = int(start_s * 1e9) + i * 100_000_000
+                yield Frame("synthetic", seq, ns, image, 320, 100)
+                seq += 1
+
+
+class HUDText(Text):
+    def __init__(self, counts):
+        super().__init__()
+        self.counts = counts  # pixel value -> text read
+
+    def read_lines(self, images):
+        return [(self.counts.get(int(images[0][0, 0, 0]), ""), 0.99)]
+
+
+@pytest.mark.parametrize("back_s, back, states", [
+    (70, "88", ["ended", "new"]),  # gone a minute (lobby, island), back with more alive
+    (70, "38", ["ended", "playing"]),  # gone a minute (alt-tab), fewer alive: the same match
+    (250, "38", ["ended", "new"]),  # gone longer than any alt-tab: a new match after all
+])
+def test_hud_count_back_after_a_long_absence_judges_a_new_match(tmp_path, back_s, back, states):
+    from kfocr.pipeline import Pipeline
+    from kfocr.storage.db import EventStore
+
+    class Matches(Sink):
+        def __init__(self):
+            super().__init__()
+            self.states = []
+
+        def publish_match(self, state):
+            self.states.append(state)
+
+    start = datetime(2026, 10, 1, tzinfo=UTC)
+    config, sink = setup(tmp_path), Matches()
+    config.roi.rect = NormalizedRect(0, 0, 0.7, 1)
+    config.roi.alive_rect = NormalizedRect(0.8, 0, 0.2, 0.2)
+    text = HUDText({41: "", 42: "40", 43: back})
+    source = Match([(0, 20, 1), (10, 10, 0), (60, 10, 0), (back_s, 20, 2)])
+    last = Pipeline(config, source, recognizer=text, reader=text, icons=Icons(), sink=sink,
+                    started_at_utc=start).run()
+    store = EventStore(config.storage.sqlite_path)
+    found = sorted(store.list_sessions(), key=lambda s: s.started_at_utc)
+    assert sink.states == states and all(s.status == "completed" for s in found)
+    assert len(found) == (2 if states[-1] == "new" else 1)
+    if len(found) == 2:
+        first, second = found
+        assert first.ended_at_utc == start + timedelta(seconds=1.5)  # the last count seen
+        assert second.session_id == last.session_id
+        assert (second.started_at_utc - start).total_seconds() >= back_s
+        assert len(store.list_events(second.session_id)) == 1  # its own tracker reads the feed afresh
+        assert (first.metadata["last_observed_alive"], last.metadata["first_observed_alive"]) == (40, int(back))
+    store.close()
+
+
+def test_a_run_closed_in_the_lobby_ends_its_session_with_the_match(tmp_path):
+    from kfocr.pipeline import Pipeline
+
+    start = datetime(2026, 10, 1, tzinfo=UTC)
+    config = setup(tmp_path)
+    config.roi.rect = NormalizedRect(0, 0, 0.7, 1)
+    config.roi.alive_rect = NormalizedRect(0.8, 0, 0.2, 0.2)
+    text = HUDText({41: "", 42: "40"})
+    session = Pipeline(config, Match([(0, 20, 1), (60, 10, 0)]), recognizer=text, reader=text,
+                       icons=Icons(), sink=Sink(), started_at_utc=start).run()
+    assert session.ended_at_utc == start + timedelta(seconds=1.5)  # the last count, not 60.9 s
+
+
+def test_a_capture_started_in_the_lobby_clears_the_board_when_the_match_starts(tmp_path):
+    from kfocr.pipeline import Pipeline
+    from kfocr.storage.db import EventStore
+
+    class Matches(Sink):
+        def __init__(self):
+            super().__init__()
+            self.states = []
+
+        def publish_match(self, state):
+            self.states.append(state)
+
+    config, sink = setup(tmp_path), Matches()
+    config.roi.rect = NormalizedRect(0, 0, 0.7, 1)
+    config.roi.alive_rect = NormalizedRect(0.8, 0, 0.2, 0.2)
+    text = HUDText({41: "", 42: "90"})
+    Pipeline(config, Match([(0, 10, 0), (50, 20, 1)]), recognizer=text, reader=text, icons=Icons(),
+             sink=sink).run()
+    assert sink.states == ["new"]  # the board may hold the last match; the session stays one
+    store = EventStore(config.storage.sqlite_path)
+    assert len(store.list_sessions()) == 1
+    store.close()
+
+
+def test_a_badge_read_after_the_event_went_out_reaches_the_db_and_the_board(tmp_path):
+    from kfocr.pipeline import Pipeline
+    from kfocr.storage.db import EventStore
+
+    class LateBadge(Text):
+        def read(self, image, icons):
+            tokens, _ = super().read(image, icons)
+            badges = [VisualElement(VisualKind.BADGE, "3", 0.99, (5, 10, 15, 30))]
+            if self.calls > 6:  # the victim's badge (right of its name) reads only after it went out
+                badges.append(VisualElement(VisualKind.BADGE, "8", 0.99, (195, 10, 205, 30)))
+            return tokens, badges
+
+    class Amended(Sink):
+        def __init__(self):
+            super().__init__()
+            self.amended = []
+
+        def publish_amended(self, event):
+            self.amended.append(event)
+
+    config, sink, text = setup(tmp_path), Amended(), LateBadge()
+    session = Pipeline(config, Frames(), recognizer=text, reader=text, icons=Icons(), sink=sink).run()
+    store = EventStore(config.storage.sqlite_path)
+    (stored,) = store.list_events(session.session_id)
+    assert sink.events[0].victim_team is None and stored.victim_team == 8
+    assert [(e.event_id, e.victim_team) for e in sink.amended] == [(stored.event_id, 8)]
+    assert session.metadata["performance"]["amended_events"] == 1
+    store.close()
 
 
 def test_failing_reads_of_a_pending_row_fall_back_to_the_refresh_pace(tmp_path):

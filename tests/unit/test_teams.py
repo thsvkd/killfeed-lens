@@ -146,6 +146,37 @@ def test_squad_size_follows_the_highest_confirmed_badge():
         fixed.apply(ev("a1", 41, victim, 3))
     assert fixed.squad_size == 4 and not fixed.teams[3].eliminated
 
+
+def test_a_badge_read_late_moves_an_unknown_team_victim_home():
+    from dataclasses import replace
+
+    ledger = Ledger(squad_size=2)
+    kill = ev("a1", 7, "b1", None)
+    ledger.apply(kill)
+    assert ledger.teams[None].dead == 1
+    ledger.amend(replace(kill, victim_team=25))
+    assert None not in ledger.teams and ledger.teams[25].dead == 1
+    assert ledger.recent[-1].victim_team == 25
+
+
+def test_a_late_badge_that_completes_a_wipe_bleeds_the_knocked_out():
+    from dataclasses import replace
+
+    ledger = Ledger(squad_size=2)
+    ledger.apply(ev("a1", 7, "b1", 25, K))
+    last = ev("a1", 7, "b2", None)
+    ledger.apply(last)
+    ledger.amend(replace(last, victim_team=25))
+    assert ledger.teams[25].eliminated and ledger.teams[25].dead == 2  # no revive in 90 s
+
+
+def test_short_squads_cannot_add_up_past_the_lobby():
+    ledger = Ledger()
+    ledger.apply(ev("a1", 30, "b1", 3))
+    ledger.apply(ev("a1", 30, "b2", 3))  # badge 30 confirmed: 30 full squads would be 120 players
+    assert ledger.squad_size == 4 and ledger.players_left == 100 - 2
+
+
 def test_kills_made_with_an_unread_badge_follow_the_player_home():
     ledger = Ledger()
     ledger.apply(ev("ace", None, "v1", 9))

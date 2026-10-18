@@ -200,6 +200,28 @@ def test_events_and_hud_readings_go_out_once_per_change():
     thread.join(5)
 
 
+def test_a_finished_match_stays_on_the_board_until_the_next_one_starts():
+    feed = FakeFeed()
+    inbox, out, stdin, thread = start_engine(feed)
+    wait_for(lambda: snaps(out))
+    sink = eng._QueueSink(inbox)
+    inbox.put(make_event("a1", 7, "b1", 25, D))
+    sink.publish_match("ended")
+    wait_for(lambda: snaps(out)[-1]["status"] == eng.MATCH_OVER)
+    assert len(snaps(out)[-1]["events"]) == 1
+    sink.publish_match("new")
+    wait_for(lambda: not snaps(out)[-1]["events"])
+    assert snaps(out)[-1]["status"] == FakeFeed.status
+    for clear in (lambda: sink.publish_match("playing"),  # back after an alt-tab
+                  lambda: inbox.put({"cmd": "tracking", "on": True})):  # capture restarted
+        sink.publish_match("ended")
+        wait_for(lambda: snaps(out)[-1]["status"] == eng.MATCH_OVER)
+        clear()
+        wait_for(lambda: snaps(out)[-1]["status"] == FakeFeed.status)
+    stdin.close()
+    thread.join(5)
+
+
 def test_demo_feed_plays_and_pauses():
     inbox: queue.Queue = queue.Queue()
     feed = eng.DemoFeed(inbox, speed=50)
@@ -225,6 +247,13 @@ def test_live_feed_waits_for_an_roi_and_saves_it_where_live_config_reads_it(tmp_
     feed.save_rois(KILLFEED, alive, (2560, 1440))
     feed.load()
     assert feed.rois == (KILLFEED, alive) and (tmp_path / "roi.yaml").exists()
+
+    feed.save_rois(KILLFEED, None, (2560, 1440))  # no HUD box saved: read PUBG's spot anyway
+    feed.load()
+    assert feed.rois == (KILLFEED, eng.ALIVE_DEFAULT)
+    feed.save_rois(KILLFEED, None, (2560, 1080))  # not 16:9: the default box may miss the HUD
+    feed.load()
+    assert feed.rois == (KILLFEED, None)
 
 
 def test_cli_wires_the_engine_and_rejects_a_bad_speed():

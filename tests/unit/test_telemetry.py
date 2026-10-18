@@ -356,6 +356,11 @@ def test_find_match_uses_documented_included_participants_and_refuses_tie():
     assert decision.match_id == "a"
     assert decision.confidence >= 0.9
 
+    # Joined from the plane, died ten minutes in: the session is short, the match runs on.
+    died = _session(started_at_utc=datetime(2026, 10, 6, 12, 1, 10, tzinfo=UTC),
+                    ended_at_utc=datetime(2026, 10, 6, 12, 11, 25, tzinfo=UTC))
+    assert find_match(died, [match("a")], "PlayerOne").status == "matched"
+
 
 def test_validate_events_uses_multiple_pairs_for_offset_and_one_to_one_assignment():
     session = _session()

@@ -123,7 +123,9 @@ def _score_match(
     membership_score = 0.40 if player_included else 0.0
     overlap_score = 0.30 * min(1.0, overlap_ratio)
     start_score = 0.20 * max(0.0, 1.0 - start_delta / 300.0)
-    duration_score = 0.10 * max(0.0, 1.0 - duration_delta / 600.0)
+    # A player who dies leaves before the match ends, so only a session outlasting it counts against
+    excess = max(0.0, session_duration - float(duration))
+    duration_score = 0.10 * max(0.0, 1.0 - excess / 600.0)
     confidence = round(membership_score + overlap_score + start_score + duration_score, 6)
     return MatchCandidate(
         match_id=match_id,

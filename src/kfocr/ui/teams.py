@@ -261,10 +261,27 @@ class Ledger:
                     player.status, player.touched, player.knocked_ns = Status.KNOCKED, now, ns
             elif kind in _LETHAL and player.status is not Status.DEAD:
                 player.status, player.touched = Status.DEAD, now
-            if victim.eliminated:  # whole squad down: knocked members bleed out with it
-                for member in victim.players.values():
-                    if member.status is Status.KNOCKED:
-                        member.status, member.touched = Status.DEAD, now
+            self._bleed_out(victim, now)
+
+    @staticmethod
+    def _bleed_out(team: Team, now: float) -> None:
+        if team.eliminated:  # whole squad down: knocked members bleed out with it
+            for member in team.players.values():
+                if member.status is Status.KNOCKED:
+                    member.status, member.touched = Status.DEAD, now
+
+    def amend(self, event: ConfirmedEvent) -> None:
+        """An applied event's badges read late: its unknown-team players go home with their
+        status and kills, as a later sighting with the badge would move them."""
+        self._saw_badges(event.observed_at_ns, event.killer_team, event.victim_team)
+        for name, team in ((event.killer_name, event.killer_team), (event.victim_name, event.victim_team)):
+            if team is not None:
+                self._attach(self._resolve(name, team), team)
+                if (home := self.teams.get(team)) is not None:  # no empty card for a misread
+                    self._bleed_out(home, time.monotonic())
+        for i, shown in enumerate(self.recent):
+            if shown.event_id == event.event_id:
+                self.recent[i] = event
 
     # --- views --------------------------------------------------------------------------
     def ranked(self) -> list[Team]:
@@ -299,7 +316,10 @@ class Ledger:
             return self.alive_count.count
         seen = self._known()
         unseen = max(0, self.team_count - len(seen)) * self.squad_size
-        return sum(t.remaining for t in seen) + unseen
+        # Lobbies run short teams (a live squad match showed badges up to 30, i.e. 120 slots), so
+        # full unseen squads can add up past the lobby: cap at the lobby less the deaths seen.
+        dead = sum(t.dead for t in self.teams.values())
+        return max(0, min(sum(t.remaining for t in seen) + unseen, LOBBY_PLAYERS - dead))
 
     @property
     def knocked_now(self) -> int:

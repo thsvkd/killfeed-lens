@@ -4,7 +4,7 @@ import hashlib
 import re
 from collections import Counter
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from uuid import UUID, uuid4
 
@@ -73,11 +73,30 @@ def same_teammate(left: str | None, right: str | None) -> bool:
     return len(short) >= 4 and short in long and re.search(r"[a-z]", long.replace(short, "", 1)) is not None
 
 
+def _reread(old: str | None, new: str | None) -> bool:
+    """A victim read again as its row scrolls: one name a part of the other (the row cut
+    mid-move), one character glued in, or the new read too short to be a name at all (PUBG names
+    have 4-16 characters; an earlier short read may still be a squadmate's real kill)."""
+    a, b = name_key(old), name_key(new)
+    if not a or not b:
+        return False
+    short, long = sorted((a, b), key=len)
+    if len(_normalized(new)) < 4 or short in long:
+        return True
+    return len(long) - len(short) == 1 and any(long[:i] + long[i + 1:] == short for i in range(len(long)))
+
+
 def _most_seen(teams: Iterable[int | None]) -> int | None:
     """Badges flicker between frames on compressed video: the most seen one wins, the first
     given on a tie (pass the latest first: a row still fading in reads worst)."""
     votes = Counter(team for team in teams if team is not None).most_common(1)
     return votes[0][0] if votes else None
+
+
+def _sure(teams: Iterable[int | None], reads: int) -> int | None:
+    """The badge read most, if read at least `reads` times (one stray read fills nothing)."""
+    votes = Counter(team for team in teams if team is not None).most_common(1)
+    return votes[0][0] if votes and votes[0][1] >= reads else None
 
 
 def _center_y(candidate: CandidateEvent) -> float:
@@ -94,6 +113,9 @@ class _Track:
     seen_ns: set[int] = field(default_factory=set)  # every update that read this row
     emitted: bool = False
     held: bool = False  # confirmable but waiting for its badges (_BADGE_WAIT_NS)
+    # The event this row emitted, or for a re-read the event it repeats: badges it reads later
+    # fill that event's missing ones.
+    confirmed: ConfirmedEvent | None = None
 
 
 class TemporalTracker:
@@ -122,6 +144,7 @@ class TemporalTracker:
         self._recent: list[tuple[int, EventType, str | None, _Track]] = []
         self._last_update_ns: int | None = None
         self._badged = False  # some row showed a badge: not solo, so unbadged rows are unread
+        self._amended: list[ConfirmedEvent] = []
 
     @property
     def pending(self) -> bool:
@@ -233,17 +256,27 @@ class TemporalTracker:
             # event even when the killer reads differently (lost clan brackets, glued badge).
             # An earlier row on screen together with this one (read in its last frame) with a
             # merely similar victim is a different row ("Kilo-0870"/"Milo-0870" killed
-            # together); an identical one is the same kill shown twice.
+            # together); an identical one is the same kill shown twice. With the same killer, type
+            # and victim badge, a victim read only in part or with a glued character is that kill
+            # again too (a row re-read while it scrolls down: 5 of 6 false events on a squad replay).
             self._recent = [
                 item for item in self._recent if observed_at_ns - item[0] <= _DUPLICATE_WINDOW_NS
             ]
-            if any(
-                (kind is candidate.event_type or EventType.UNKNOWN in (kind, candidate.event_type))
-                and _same_player(victim, candidate.victim_name)
-                and (track.last_seen_ns not in other.seen_ns
-                     or name_key(victim) == name_key(candidate.victim_name))
-                for _, kind, victim, other in self._recent
-            ):
+            rows = [*self._tracks, *(item[3] for item in self._recent)]
+            repeated = next((
+                other for _, kind, victim, other in reversed(self._recent)
+                if (kind is candidate.event_type or EventType.UNKNOWN in (kind, candidate.event_type))
+                and (name_key(victim) == name_key(candidate.victim_name) or not any(  # on screen
+                    row.confirmed is other.confirmed and track.last_seen_ns in row.seen_ns
+                    for row in rows))
+                and (_same_player(victim, candidate.victim_name) or (
+                    other.confirmed is not None and kind is candidate.event_type
+                    and other.confirmed.victim_team is not None
+                    and other.confirmed.victim_team == victim_team
+                    and _same_player(other.confirmed.killer_name, candidate.killer_name)
+                    and _reread(victim, candidate.victim_name)))), None)
+            if repeated is not None:
+                track.emitted, track.confirmed = True, repeated.confirmed
                 continue
             self._recent.append((observed_at_ns, candidate.event_type, candidate.victim_name, track))
             track.representative = candidate
@@ -253,16 +286,16 @@ class TemporalTracker:
             values["observed_at_ns"] = track.first_seen_ns
             # Rows scroll: crop where the row is now, not where the best frame saw it.
             values["source_bbox"] = track.latest.source_bbox
-            emitted.append(
-                ConfirmedEvent(
-                    **values,
-                    event_id=uuid4(),
-                    session_id=self.session_id,
-                    confirmed_at_ns=observed_at_ns,
-                    dedup_key=self._dedup_key(track),
-                    tracker_evidence_count=evidence_count,
-                )
+            track.confirmed = ConfirmedEvent(
+                **values,
+                event_id=uuid4(),
+                session_id=self.session_id,
+                confirmed_at_ns=observed_at_ns,
+                dedup_key=self._dedup_key(track),
+                tracker_evidence_count=evidence_count,
             )
+            emitted.append(track.confirmed)
+        self._amend(observed_at_ns, emitted)
         # Expire only rows missing from this successful observation; failed inference never
         # calls update, so it cannot make a still-visible emitted row look new again. A held row
         # outlives this: _badge_wait_ns <= max_gap_ns, so it emits first.
@@ -272,6 +305,37 @@ class TemporalTracker:
             if observed_at_ns - track.last_seen_ns <= self.max_gap_ns
         ]
         return emitted
+
+    def take_amended(self) -> list[ConfirmedEvent]:
+        """Events emitted in earlier updates whose missing badges later reads filled in."""
+        amended, self._amended = self._amended, []
+        return amended
+
+    def _amend(self, observed_at_ns: int, emitted: list[ConfirmedEvent]) -> None:
+        """A row keeps being read after it emitted (and its re-reads with it): a badge it lacked
+        then and reads now, twice, fills the event in (badges flicker in a burst of rows)."""
+        tracks = [*self._tracks, *(item[3] for item in self._recent)]
+        for track in self._tracks:
+            event = track.confirmed
+            if (event is None or track.last_seen_ns != observed_at_ns
+                    or None not in (event.killer_team, event.victim_team)):
+                continue
+            seen = [candidate for _, candidate in track.evidence]
+            killer = event.killer_team if event.killer_team is not None else _sure(
+                (c.killer_team for c in seen), self.evidence_frames)
+            victim = event.victim_team if event.victim_team is not None else _sure(
+                (c.victim_team for c in seen), self.evidence_frames)
+            if (killer, victim) == (event.killer_team, event.victim_team):
+                continue
+            fixed = replace(event, killer_team=killer, victim_team=victim)
+            for other in tracks:
+                if other.confirmed is event:
+                    other.confirmed = fixed
+            index = next((i for i, item in enumerate(emitted) if item is event), None)
+            if index is not None:  # emitted this update: not out yet, so no amendment needed
+                emitted[index] = fixed
+            else:
+                self._amended = [e for e in self._amended if e.event_id != event.event_id] + [fixed]
 
     def _observe(
         self, track: _Track, candidate: CandidateEvent, observed_at_ns: int
