@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 from importlib import metadata
@@ -12,9 +13,34 @@ import numpy as np
 from kfocr.domain.models import OCRToken
 
 # ponytail: ONNX Runtime defaults to one busy-waiting thread per core (~8 cores at 1440p, which
-# drops game frames); two threads cut OCR CPU ~70% at equal accuracy. Killfeed text is always
-# horizontal, so the angle classifier only costs time. Raise threads if latency matters more.
-ENGINE_SETTINGS: dict[str, Any] = {"intra_op_num_threads": 2, "inter_op_num_threads": 1, "use_cls": False}
+# drops game frames). One thread, no spin-wait: with PUBG running a second thread made a name read
+# ~30% faster for ~1.3x the CPU, and its spin-wait burnt ~32 ms CPU after every sparse call.
+# Killfeed text is always horizontal, so the angle classifier only costs time. Raise threads
+# if latency matters more than the game's CPU.
+ENGINE_SETTINGS: dict[str, Any] = {"intra_op_num_threads": 1, "inter_op_num_threads": 1, "use_cls": False}
+# rapidocr builds its own SessionOptions and only exposes thread counts; _quiet_sessions adds these.
+SESSION_CONFIG = {"session.intra_op.allow_spinning": "0", "session.inter_op.allow_spinning": "0"}
+
+
+def _quiet_sessions() -> None:
+    try:
+        from rapidocr_onnxruntime.utils import infer_engine
+
+        build = infer_engine.OrtInferSession._init_sess_opts
+    except (ImportError, AttributeError):  # another rapidocr layout: OCR still works, spins
+        logging.getLogger(__name__).warning("cannot disable ONNX Runtime spin-wait")
+        return
+    if getattr(build, "kfocr_quiet", False):
+        return
+
+    def options(config: dict[str, Any]) -> Any:
+        opts = build(config)
+        for key, value in SESSION_CONFIG.items():
+            opts.add_session_config_entry(key, value)
+        return opts
+
+    options.kfocr_quiet = True  # type: ignore[attr-defined]
+    infer_engine.OrtInferSession._init_sess_opts = staticmethod(options)
 
 
 class RapidOCRRecognizer:
@@ -34,6 +60,7 @@ class RapidOCRRecognizer:
                 raise RuntimeError(
                     "Local OCR requires the OCR extra: pip install 'killfeed-lens[ocr]'"
                 ) from exc
+            _quiet_sessions()
             engine = RapidOCR(**ENGINE_SETTINGS)
         self._engine = engine
 
@@ -107,6 +134,7 @@ def model_manifest() -> dict[str, Any]:
         "status": "ready" if models else "unknown",
         "models": models,
         "settings": ENGINE_SETTINGS,
+        "session_config": SESSION_CONFIG,
     }
 
 

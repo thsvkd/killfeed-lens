@@ -150,18 +150,6 @@ class TemplateIconRecognizer:
         return templates
 
 
-def mask_icons(image: np.ndarray, icons: list[VisualElement]) -> np.ndarray:
-    """Blank detected icons so OCR does not read them as letters glued to a name."""
-    if not icons:
-        return image
-    masked = image.copy()
-    for icon in icons:
-        left, top, right, bottom = icon.bbox
-        pad = max(1, (bottom - top) // 4)  # Anti-aliased edges outside the match still read as "R".
-        masked[max(0, top - pad):bottom + pad, max(0, left - pad):right + pad] = 0
-    return masked
-
-
 def _gray(image: np.ndarray) -> np.ndarray:
     if image.ndim == 2:
         return image

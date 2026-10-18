@@ -23,6 +23,9 @@ class Text:
         return [OCRToken("AAAA", 0.99, (20, 10, 70, 30)),
                 OCRToken("BBBB", 0.99, (130, 10, 190, 30))]
 
+    def read(self, image, icons):  # the pipeline's per-frame name reader
+        return self.recognize(image), []
+
 
 def test_harvest_build_then_replay_confirms_typed_event(tmp_path):
     from kfocr.pipeline import Pipeline
@@ -66,7 +69,7 @@ def test_harvest_build_then_replay_confirms_typed_event(tmp_path):
         def publish(self, event):
             events.append(event)
 
-    Pipeline(config, Source(), recognizer=Text(), sink=Sink()).run()
+    Pipeline(config, Source(), recognizer=Text(), reader=Text(), sink=Sink()).run()
     assert [(e.killer_name, e.victim_name, e.event_type.value) for e in events] == [
         ("AAAA", "BBBB", "kill")]
 

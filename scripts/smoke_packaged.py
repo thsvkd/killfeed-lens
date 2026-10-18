@@ -1,6 +1,7 @@
-"""Smoke a packaged executable: the CLI parses, the GUI starts and the bundled OCR models run.
+"""Smoke the packaged app: the Electron UI renders every window on the bundled engine, and the
+engine's kfocr.exe parses, streams board snapshots, starts the Tk GUI and runs the bundled OCR.
 
-Used by CI and script/package.ps1, e.g.  python scripts/smoke_packaged.py dist/killfeed-lens/kfocr.exe
+Used by CI and script/package.ps1, e.g.  python scripts/smoke_packaged.py dist/KillfeedLens-win32-x64
 """
 
 import argparse
@@ -9,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import cv2
@@ -34,18 +36,54 @@ def _video(path: Path) -> None:
     writer.release()
 
 
+def _engine_snapshot(exe: Path) -> None:
+    """`kfocr.exe engine --demo` prints a contract v1 snapshot at once and exits on stdin EOF."""
+    proc = subprocess.Popen([str(exe), "engine", "--demo"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                            encoding="utf-8")
+    timer = threading.Timer(120, proc.kill)  # a hung engine fails the smoke instead of blocking
+    timer.start()
+    try:
+        assert proc.stdout is not None and proc.stdin is not None
+        line = proc.stdout.readline()
+        proc.stdin.close()
+        code = proc.wait()
+    finally:
+        timer.cancel()
+    try:
+        snap = json.loads(line)
+    except ValueError:
+        raise SystemExit(f"FAIL engine --demo printed no snapshot: {line!r}") from None
+    if snap.get("v") != 1 or snap.get("mode") != "demo" or code != 0:
+        raise SystemExit(f"FAIL engine --demo: exit {code}, snapshot {line[:200]!r}")
+    print(f"ok   {exe.name} engine --demo (snapshot v1, exit 0 on stdin EOF)")
+
+
+def _ui_shots(ui: Path) -> None:
+    """The fused, asar-packed UI on the bundled engine, by the same check as `npm run smoke`."""
+    smoke = Path(__file__).resolve().parents[1] / "app" / "smoke.mjs"
+    result = subprocess.run(["node", str(smoke), str(ui)], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=360)
+    if result.returncode != 0:
+        raise SystemExit(f"FAIL {ui.name} --demo --shots\n{result.stdout}\n{result.stderr[-2000:]}")
+    print(f"ok   {ui.name} --demo --shots (app/smoke.mjs: a PNG per window, no renderer warnings)")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("exe", type=Path)
+    parser.add_argument("app", type=Path, help="Packaged app directory (KillfeedLens-win32-x64)")
     parser.add_argument("--work", type=Path, default=Path("build/smoke"))
     args = parser.parse_args()
-    exe = args.exe.resolve()
-    if not exe.is_file():
-        raise SystemExit(f"FAIL missing executable: {exe}")
-    work = args.work.resolve() / exe.stem
+    app = args.app.resolve()
+    ui, exe = app / "KillfeedLens.exe", app / "resources" / "killfeed-lens" / "kfocr.exe"
+    for path in (ui, exe):
+        if not path.is_file():
+            raise SystemExit(f"FAIL missing executable: {path}")
+    work = args.work.resolve() / app.name
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     _run(exe, "--help")
+    _engine_snapshot(exe)
     _run(exe, "gui", "--demo", "--exit-after", "3")
     video, db = work / "smoke.mp4", work / "smoke.sqlite3"
     _video(video)
@@ -58,6 +96,7 @@ def main() -> int:
     if performance["inference_calls"] <= 0 or performance["ocr_errors"] != 0:
         raise SystemExit(f"FAIL bundled OCR did not run cleanly: {performance}")
     print(f"ok   bundled OCR ran {performance['inference_calls']} inferences without errors")
+    _ui_shots(ui)
     return 0
 
 

@@ -1,19 +1,44 @@
 from __future__ import annotations
 
+import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any, Protocol
 
 import numpy as np
 
 from kfocr.capture.base import CaptureHealth, CaptureState
-from kfocr.domain.models import Frame
+from kfocr.domain.models import Frame, NormalizedRect
+from kfocr.vision.roi import pixel_rect
+
+Box = tuple[int, int, int, int]
 
 
 class _Backend(Protocol):
-    def grab(self) -> np.ndarray | None: ...
+    def grab(self, region: Box | None = None) -> np.ndarray | None: ...
 
     def stop(self) -> None: ...
+
+
+def lower_thread_priority() -> None:
+    """Run the calling (engine) thread below normal so the game wins CPU contention. With PUBG
+    running this cost no read latency (p50 45.1 vs 45.0 ms, p95 57.3 vs 58.3 ms)."""
+    if sys.platform == "win32":
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentThread.restype = ctypes.c_void_p
+        k32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        k32.SetThreadPriority(k32.GetCurrentThread(), -1)  # THREAD_PRIORITY_BELOW_NORMAL
+
+
+def region_box(regions: Sequence[NormalizedRect], width: int, height: int) -> Box:
+    """Pixel bbox covering every ROI. ponytail: one union grab, not one grab per ROI; a grab costs
+    ~0.5 ms + ~1.2 ms per megapixel copied, so separate grabs only pay off for ROIs more than
+    ~0.45 Mpx apart, and one grab keeps both ROIs on the same desktop frame."""
+    boxes = [pixel_rect(rect, width, height) for rect in regions]
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
 
 
 def _patch_dxcam_double_release() -> None:
@@ -56,8 +81,13 @@ class _DXCamBackend:
             backend="dxgi",
         )
 
-    def grab(self) -> np.ndarray | None:
-        return self._camera.grab(new_frame_only=False)
+    def grab(self, region: Box | None = None) -> np.ndarray | None:
+        # region: the GPU copies only that rectangle (CopySubresourceRegion) before readback
+        return self._camera.grab(region=region, new_frame_only=False)
+
+    @property
+    def resolution(self) -> tuple[int, int]:
+        return self._camera.width, self._camera.height
 
     def stop(self) -> None:
         self._camera.release()
@@ -74,6 +104,7 @@ class ScreenSource:
         recovery_frame_count: int = 2,
         max_retries: int = 3,
         backend_factory: Callable[[int], _Backend] | None = None,
+        regions: Sequence[NormalizedRect] = (),
     ) -> None:
         if monitor < 0 or sample_fps <= 0:
             raise ValueError("monitor must be non-negative and sample_fps must be positive")
@@ -87,6 +118,9 @@ class ScreenSource:
         self.stale_frame_limit = stale_frame_limit
         self.recovery_frame_count = recovery_frame_count
         self.max_retries = max_retries
+        # Non-empty: grab only the bbox of these ROIs and yield region frames (Frame.origin set);
+        # the backend must then expose `resolution`. Empty: whole frames (calibration screenshot).
+        self.regions = tuple(regions)
         self._backend_factory = backend_factory or _DXCamBackend
         self._backend: _Backend | None = None
         self._running = False
@@ -96,6 +130,7 @@ class ScreenSource:
         self._black_count = 0
         self._stale_count = 0
         self._recovery_count = 0
+        self._probe: tuple[int, bool] | None = None  # (checked_at_ns, whole screen black)
         self.health = CaptureHealth(CaptureState.STOPPED)
 
     def start(self) -> None:
@@ -114,6 +149,7 @@ class ScreenSource:
         self._black_count = 0
         self._stale_count = 0
         self._recovery_count = 0
+        self._probe = None
         self.health = CaptureHealth(CaptureState.HEALTHY)
 
     def frames(self) -> Iterator[Frame]:
@@ -121,14 +157,21 @@ class ScreenSource:
             raise RuntimeError("ScreenSource.start() must be called before frames()")
         interval_ns = round(1_000_000_000 / self.sample_fps)
         next_capture_ns = time.monotonic_ns()
+        lower_thread_priority()
 
         while self._running and self._backend is not None:
             now_ns = time.monotonic_ns()
             if now_ns < next_capture_ns:
                 time.sleep((next_capture_ns - now_ns) / 1_000_000_000)
             next_capture_ns = max(next_capture_ns + interval_ns, time.monotonic_ns())
+            box: Box | None = None
             try:
-                image = self._backend.grab()
+                if self.regions:
+                    width, height = self._backend.resolution  # type: ignore[attr-defined]
+                    box = region_box(self.regions, width, height)
+                    image = self._backend.grab(box)
+                else:
+                    image = self._backend.grab()
             except StopIteration:
                 self._retry_backend(RuntimeError("capture backend stopped unexpectedly"))
                 continue
@@ -151,7 +194,13 @@ class ScreenSource:
                 self._degrade("backend_failure", detail, 1)
                 self._retry_backend(RuntimeError(detail))
                 continue
-            height, width = image.shape[:2]
+            if box is None:
+                height, width = image.shape[:2]
+            elif image.shape[:2] != (box[3] - box[1], box[2] - box[0]):
+                detail = f"capture backend returned {image.shape[1]}x{image.shape[0]} for region {box}"
+                self._degrade("backend_failure", detail, 1)
+                self._retry_backend(RuntimeError(detail))
+                continue
             if width <= 0 or height <= 0:
                 detail = f"capture backend returned invalid resolution {width}x{height}"
                 self._degrade("invalid_resolution", detail, 1)
@@ -182,7 +231,15 @@ class ScreenSource:
                 )
                 continue
 
-            if not np.any(image):
+            if image.max() == 0:  # not np.any(image), ~45x cheaper
+                if box is not None:
+                    try:
+                        screen_black = self._screen_black(captured_at_ns)
+                    except Exception as exc:
+                        self._retry_backend(exc)
+                        continue
+                    if not screen_black:
+                        continue  # e.g. a loading screen's black corner: no killfeed, not a failure
                 self._black_count += 1
                 if self._black_count >= self.black_frame_limit:
                     detail = "capture returned consecutive black frames"
@@ -191,6 +248,7 @@ class ScreenSource:
                     self._black_count = 0
                 continue
             self._black_count = 0
+            self._probe = None
 
             if not self._record_good_frame(captured_at_ns, resolution):
                 continue
@@ -201,6 +259,7 @@ class ScreenSource:
                 image_bgr=image,
                 width=width,
                 height=height,
+                origin=None if box is None else (box[0], box[1]),
             )
             self._seq += 1
 
@@ -214,6 +273,15 @@ class ScreenSource:
                 self._backend = None
         if not preserve_error:
             self.health = CaptureHealth(CaptureState.STOPPED)
+
+    def _screen_black(self, now_ns: int) -> bool:
+        """Region mode saw black ROIs: is the whole screen black (a capture failure) or only the
+        ROIs? One full grab answers it, at most once a second while the ROIs stay black."""
+        if self._probe is None or now_ns - self._probe[0] >= 1_000_000_000:
+            assert self._backend is not None
+            full = self._backend.grab()
+            self._probe = (now_ns, full is not None and full.max() == 0)
+        return self._probe[1]
 
     def _degrade(self, reason: str, detail: str, bad_count: int) -> None:
         self._recovery_count = 0

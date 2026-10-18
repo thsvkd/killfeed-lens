@@ -188,16 +188,6 @@ def test_parser_reads_pubg_layout_names_without_badges_clans_or_icon_debris() ->
     assert (parsed.killer_name_raw, parsed.victim_name_raw) == ("30[AB] Kil1er", "[CD]Vic.tim")
 
 
-def test_mask_icons_blanks_marker_with_antialias_margin() -> None:
-    import numpy as np
-
-    from kfocr.vision.icons import mask_icons
-
-    image = np.full((30, 60, 3), 200, dtype=np.uint8)
-    masked = mask_icons(image, [VisualElement(VisualKind.ICON, "kill_marker", 0.9, (20, 6, 40, 26))])
-    assert not masked[1:31, 15:45].any() and masked[0, 0].all() and image.all()
-
-
 def test_canonical_name_keeps_names_through_ocr_bracket_and_dot_noise() -> None:
     from kfocr.domain.parser import _canonical_name
 

@@ -59,14 +59,123 @@ def test_dxcam_backend_requests_latest_frame_when_desktop_pixels_are_unchanged()
     expected = np.full((8, 12, 3), 42, dtype=np.uint8)
 
     class Camera:
-        def grab(self, *, new_frame_only):
+        width, height = 12, 8
+        regions = []
+
+        def grab(self, *, region, new_frame_only):
             assert new_frame_only is False
+            self.regions.append(region)
             return expected
 
     backend = _DXCamBackend.__new__(_DXCamBackend)
     backend._camera = Camera()
 
     assert backend.grab() is expected
+    assert backend.grab((2, 0, 12, 4)) is expected  # dxcam copies only this box on the GPU
+    assert Camera.regions == [None, (2, 0, 12, 4)] and backend.resolution == (12, 8)
+
+
+class _RegionBackend:
+    """dxcam-like: grab(box) returns just that box of a fixed screen."""
+
+    def __init__(self, screen, resolutions=None):
+        self.screen, self.boxes, self.stopped = screen, [], False
+        self.resolutions = iter(resolutions or [])
+
+    @property
+    def resolution(self):
+        override = next(self.resolutions, None)
+        return override or (self.screen.shape[1], self.screen.shape[0])
+
+    def grab(self, region=None):
+        self.boxes.append(region)
+        left, top, right, bottom = region or (0, 0, self.screen.shape[1], self.screen.shape[0])
+        return self.screen[top:bottom, left:right].copy()
+
+    def stop(self):
+        self.stopped = True
+
+
+def _screen(width=200, height=100):
+    screen = np.full((height, width, 3), 60, dtype=np.uint8)
+    screen[:, :, 0] = np.arange(width, dtype=np.uint8)[None, :]  # column index in blue
+    screen[:, :, 1] = np.arange(height, dtype=np.uint8)[:, None]  # row index in green
+    return screen
+
+
+def test_screen_source_grabs_only_the_union_of_the_rois_with_screen_coordinates():
+    from kfocr.domain.models import NormalizedRect
+    from kfocr.pipeline import _crop
+
+    feed, alive = NormalizedRect(0.5, 0.1, 0.5, 0.4), NormalizedRect(0.9, 0.0, 0.1, 0.05)
+    backend = _RegionBackend(_screen())
+    source = ScreenSource(sample_fps=1000, backend_factory=lambda monitor: backend,
+                          regions=(feed, alive))
+    source.start()
+    frame = next(source.frames())
+    assert source.health.resolution == (200, 100)  # the screen, not the region
+    source.stop()
+
+    assert backend.boxes == [(100, 0, 200, 50)]  # one GPU copy covering both ROIs
+    assert (frame.width, frame.height, frame.origin) == (200, 100, (100, 0))
+    assert frame.image_bgr.shape == (50, 100, 3)
+    roi = _crop(frame, feed)  # what the pipeline OCRs: screen pixels (100..200, 10..50)
+    assert roi.shape == (40, 100, 3)
+    assert (int(roi[0, 0, 0]), int(roi[0, 0, 1])) == (100, 10)
+
+
+def test_region_capture_rejects_wrong_sized_regions_and_recovers_after_resolution_change():
+    from kfocr.domain.models import NormalizedRect
+
+    class WrongSize(_RegionBackend):
+        def grab(self, region=None):
+            return np.full((3, 3, 3), 50, dtype=np.uint8)
+
+    wrong = WrongSize(_screen())
+    # second backend: one 200x100 frame, then the display reports 160x80 (resolution change)
+    backends = [wrong, _RegionBackend(_screen(), [None, (160, 80)]), _RegionBackend(_screen(160, 80))]
+    source = ScreenSource(sample_fps=1000, recovery_frame_count=1, max_retries=3,
+                          backend_factory=lambda monitor: backends.pop(0),
+                          regions=(NormalizedRect(0.5, 0.0, 0.5, 0.5),))
+    source.start()
+    iterator = source.frames()
+    first = next(iterator)  # wrong size -> retried on a new backend
+    assert source.health.retry_count == 1 and first.width == 200
+    resized = next(iterator)  # 160x80 is seen once, the backend rebuilt, then accepted
+    assert (resized.width, resized.height, resized.origin) == (160, 80, (80, 0))
+    assert resized.image_bgr.shape == (40, 80, 3)
+    source.stop()
+
+
+def test_region_capture_fails_on_a_black_screen_but_skips_a_black_roi():
+    from kfocr.domain.models import NormalizedRect
+
+    rois = (NormalizedRect(0.5, 0.0, 0.5, 0.5),)
+    black = np.zeros((100, 200, 3), dtype=np.uint8)  # desktop duplication lost the game
+    source = ScreenSource(sample_fps=1000, black_frame_limit=2, max_retries=0,
+                          backend_factory=lambda monitor: _RegionBackend(black), regions=rois)
+    source.start()
+    with pytest.raises(RuntimeError, match="black_frames"):
+        next(source.frames())
+    assert source.health.reason == "black_frames"
+
+    class LoadingScreen(_RegionBackend):
+        def grab(self, region=None):
+            if region is not None and len(self.boxes) > 40:
+                self.screen[10, 150] = 255  # the killfeed comes back after 40 black-ROI frames
+            return super().grab(region)
+
+    corner = _screen()
+    corner[:, 100:] = 0  # loading screen: the killfeed corner is black, the rest is not
+    backend = LoadingScreen(corner)
+    source = ScreenSource(sample_fps=1000, black_frame_limit=2, max_retries=0,
+                          backend_factory=lambda monitor: backend, regions=rois)
+    source.start()
+    frame = next(source.frames())  # no black_frames failure despite 40 black ROIs in a row
+    assert frame.origin == (100, 0) and int(frame.image_bgr[10, 50].max()) == 255
+    assert source.health.state is CaptureState.HEALTHY and source.health.retry_count == 0
+    assert backend.boxes.count(None) == 1  # one full-screen probe for the whole black spell
+    source.stop()
 
 
 def test_screen_source_does_not_yield_black_frames_and_exposes_degraded_health():

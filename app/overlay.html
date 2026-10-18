@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'">
+<title>killfeed-lens overlay</title>
+<link rel="stylesheet" href="node_modules/pretendard/dist/web/variable/pretendardvariable.css">
+<link rel="stylesheet" href="base.css">
+<link rel="stylesheet" href="overlay.css">
+</head>
+<body>
+<div id="panel">
+  <div class="edit-hint">드래그해서 이동 · 메인 창에서 ‘위치 확정’</div>
+  <header class="head">
+    <div class="stat">
+      <b id="players" class="num big">-</b>
+      <span id="players-label" class="lbl">남은 인원 · 추정</span>
+    </div>
+    <span id="flag" class="flag" hidden></span>
+    <div class="stat r">
+      <b id="teams" class="num mid">-</b>
+      <span class="lbl">남은 팀 · 추정</span>
+    </div>
+  </header>
+  <div class="gauge" aria-hidden="true"><i id="gauge"></i></div>
+  <ol id="rows" class="rows"></ol>
+  <div id="more" class="more" hidden></div>
+  <footer id="last" class="last hot-able" hidden>
+    <span id="last-icon" class="last-icon"></span>
+    <div class="last-text">
+      <p id="last-who" class="who"></p>
+      <p class="what"><span id="last-verb"></span> · <span id="last-ago"></span></p>
+    </div>
+  </footer>
+</div>
+<script src="common.js"></script>
+<script src="overlay.js"></script>
+</body>
+</html>

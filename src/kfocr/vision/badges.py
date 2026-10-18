@@ -81,10 +81,12 @@ def _box_beside(image: np.ndarray, black: np.ndarray, x: int, top: int, bottom: 
 
 
 def read_badges(
-    image: np.ndarray, read: Callable[[list[np.ndarray]], list[tuple[str, float]]]
+    image: np.ndarray, read: Callable[[list[np.ndarray]], list[tuple[str, float]]],
+    boxes: list[BBox] | None = None,
 ) -> list[VisualElement]:
-    """Read each badge box on its own; boxes whose text is not a team number are dropped."""
-    boxes = find_badges(image)
+    """Read each badge box (found here by its border unless given) on its own; boxes whose text is
+    not a team number are dropped."""
+    boxes = find_badges(image) if boxes is None else boxes
     if not boxes:
         return []
     # At native size the recognizer drops a narrow "1" or a repeated digit ("41"/"44" -> "4").
@@ -95,17 +97,3 @@ def read_badges(
     return [VisualElement(VisualKind.BADGE, text.strip(), float(confidence), box)
             for box, (text, confidence) in zip(boxes, read(crops), strict=True)
             if _DIGITS.fullmatch(text.strip())]
-
-
-def mask_badges(image: np.ndarray, badges: list[VisualElement]) -> np.ndarray:
-    """Paint read badges with the row background so row OCR cannot glue their digits onto the
-    names beside them; a black box instead made the detector skip an adjacent name."""
-    if not badges:
-        return image
-    masked = image.copy()
-    for badge in badges:
-        left, top, right, bottom = badge.bbox
-        beside = np.concatenate([image[top:bottom, max(0, left - 4):max(0, left - 2)].reshape(-1, 3),
-                                 image[top:bottom, right + 2:right + 4].reshape(-1, 3)])
-        masked[top:bottom, max(0, left - 1):right + 1] = np.median(beside, axis=0) if len(beside) else 0
-    return masked

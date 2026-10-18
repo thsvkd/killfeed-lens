@@ -15,6 +15,16 @@ SQUAD_SIZE = 4
 # with repeated knocks), so use a conservative bound.
 # ponytail: a death the OCR missed shows as alive after this; make it per-knock-count if measured.
 KNOCK_TIMEOUT_NS = 90 * 1_000_000_000
+# Badges number the teams 1..N in a lobby of about 100 players, so the highest badge seen tells
+# squads (~25 teams) from duos (~50) and solos. A badge counts once it was seen again at least a
+# second later: one bad frame misreads every row on it alike (38 -> 88 on two rows of one frame).
+# ponytail: assumes a full public lobby; pass squad_size/teams for custom or small matches.
+LOBBY_PLAYERS = 100
+_BADGE_APART_NS = 1_000_000_000
+# Teams that leave the lobby keep their numbers (2 of 27 squads and 2 of 53 duos on two recorded
+# matches), so up to this many never-seen badges may be no team at all.
+# ponytail: measured on two matches; retune with more telemetry.
+LOBBY_LEAVERS = 2
 _LETHAL = {EventType.KILL, EventType.FINISH, EventType.BLEEDOUT, EventType.SUICIDE,
            EventType.ENVIRONMENT}
 _CREDIT = {EventType.KILL, EventType.FINISH}
@@ -33,6 +43,8 @@ class Player:
     touched: float = 0.0  # time.monotonic() of the last change, for UI highlighting
     revived: float = 0.0  # time.monotonic() of the last comeback (revive/recall/AED/expiry)
     knocked_ns: int = 0
+    kills: int = 0  # credited to this player, so they follow it out of the unknown-badge bucket
+    knocks: int = 0
 
 
 @dataclass
@@ -69,6 +81,15 @@ class Team:
         return self.id is not None and self.dead + self.knocked >= self.squad_size
 
     @property
+    def maybe_out(self) -> bool:
+        """Every seen member is down but a full squad was never seen: the feed and HUD cannot tell
+        a wiped, underfilled team from one whose unseen member is alive. Narrowing this (e.g. one
+        unseen slot at most) dropped range coverage from 23/23 to 8/23 checkpoints on a squad match."""
+        return (self.id is not None and bool(self.players) and not self.eliminated
+                and len(self.players) < self.squad_size
+                and all(p.status is not Status.ALIVE for p in self.players.values()))
+
+    @property
     def remaining(self) -> int:
         return 0 if self.eliminated else self.total - self.dead
 
@@ -82,14 +103,18 @@ class Ledger:
     """Folds confirmed killfeed events into per-team state.
 
     `teams` (start team count) is optional: with it, never-seen teams count as full squads;
-    without it the totals only cover teams that appeared in the feed.  `scale` is feed-seconds per
-    wall-second (only the demo runs faster than real time).
+    without it the highest confirmed badge stands in for it, and before any badge the totals only
+    cover teams that appeared in the feed. `squad_size` left out is inferred from the badges.
+    `scale` is feed-seconds per wall-second (only the demo runs faster than real time).
     """
 
-    def __init__(self, squad_size: int = SQUAD_SIZE, teams: int | None = None, keep: int = 300,
+    def __init__(self, squad_size: int | None = None, teams: int | None = None, keep: int = 300,
                  scale: float = 1.0):
-        self.squad_size = squad_size
+        self.fixed_squad = squad_size is not None
+        self.squad_size = squad_size or SQUAD_SIZE
         self.start_teams = teams
+        self.top_badge = 0
+        self._badge_seen: dict[int, int] = {}
         self.scale = scale
         self.teams: dict[int | None, Team] = {}
         self.recent: deque[ConfirmedEvent] = deque(maxlen=keep)
@@ -115,6 +140,28 @@ class Ledger:
             self.teams[key] = Team(key, self.squad_size)
         return self.teams[key]
 
+    def _saw_badges(self, ns: int, *badges: int | None) -> None:
+        for badge in {b for b in badges if b is not None}:
+            first = self._badge_seen.setdefault(badge, ns)
+            if ns - first < _BADGE_APART_NS or badge <= self.top_badge:
+                continue
+            self.top_badge = badge
+            # ponytail: a misread repeated over a second ("19" read "49" twice) still shrinks the
+            # squad for good. Waiting for a second team's badge cost the duo replay 2.5 points of
+            # dead/eliminated; revisit if a live match shows a wrong squad size.
+            ratio = LOBBY_PLAYERS / badge
+            size = SQUAD_SIZE if ratio >= 3 else 2 if ratio >= 1.5 else 1
+            if not self.fixed_squad and size < self.squad_size:
+                self.squad_size = size
+                for team in self.teams.values():
+                    team.squad_size = size
+
+    @property
+    def team_count(self) -> int:
+        """The start team count teams_left counts down from: given, else the highest confirmed
+        badge (0: unknown yet)."""
+        return self.start_teams or self.top_badge
+
     def _resolve(self, name: str | None, team: int | None) -> str | None:
         """Map an OCR spelling variant onto the player already on the board: an exact name
         first, then the same folded spelling, then (within a known squad) a partial read."""
@@ -139,7 +186,12 @@ class Ledger:
             self._team_of[name] = team
             orphans = self.teams.get(None)
             if orphans and name in orphans.players:
-                self._team(team).players.setdefault(name, orphans.players.pop(name))
+                moved, home = orphans.players.pop(name), self._team(team)
+                kept = home.players.setdefault(name, moved)
+                if kept is not moved:
+                    kept.kills, kept.knocks = kept.kills + moved.kills, kept.knocks + moved.knocks
+                home.kills, home.knocks = home.kills + moved.kills, home.knocks + moved.knocks
+                orphans.kills, orphans.knocks = orphans.kills - moved.kills, orphans.knocks - moved.knocks
                 if not (orphans.players or orphans.kills or orphans.knocks):
                     del self.teams[None]
         return team
@@ -171,6 +223,7 @@ class Ledger:
         kind = event.event_type
         if kind is EventType.UNKNOWN:
             return
+        self._saw_badges(ns, event.killer_team, event.victim_team)
         killer_name = self._resolve(event.killer_name, event.killer_team)
         victim_name = self._resolve(event.victim_name, event.victim_team)
         killer_key = self._attach(killer_name, event.killer_team)
@@ -180,6 +233,7 @@ class Ledger:
             if killer_name or killer_key is not None:
                 killer = self._team(killer_key)
                 killer.touched, killer.last_ns = now, ns
+                player = None
                 if killer_name:
                     player = killer.players.setdefault(killer_name, Player(killer_name))
                     if player.status is not Status.ALIVE:  # acting players are alive, however we got here
@@ -188,8 +242,12 @@ class Ledger:
                 if not friendly:
                     if kind in _CREDIT:
                         killer.kills += 1
+                        if player:
+                            player.kills += 1
                     else:
                         killer.knocks += 1
+                        if player:
+                            player.knocks += 1
 
         if victim_name or victim_key is not None:
             victim = self._team(victim_key)
@@ -220,16 +278,27 @@ class Ledger:
 
     @property
     def teams_left(self) -> int:
-        if self.start_teams:
-            return max(0, self.start_teams - sum(t.eliminated for t in self._known()))
-        return sum(not t.eliminated for t in self._known())
+        known = self._known()
+        if self.team_count:
+            return max(0, max(self.team_count, len(known)) - sum(t.eliminated for t in known))
+        return sum(not t.eliminated for t in known)
+
+    @property
+    def teams_left_min(self) -> int:
+        """teams_left without the teams that may already be wiped (Team.maybe_out) and, while the
+        top badge stands in for the team count, the lobby leavers among never-seen badges."""
+        leavers = 0
+        if not self.start_teams:
+            unseen = sum(b not in self._badge_seen for b in range(1, self.top_badge + 1))
+            leavers = min(LOBBY_LEAVERS, unseen)
+        return max(0, self.teams_left - sum(t.maybe_out for t in self._known()) - leavers)
 
     @property
     def players_left(self) -> int:
         if self.alive_count is not None:
             return self.alive_count.count
         seen = self._known()
-        unseen = max(0, (self.start_teams or 0) - len(seen)) * self.squad_size
+        unseen = max(0, self.team_count - len(seen)) * self.squad_size
         return sum(t.remaining for t in seen) + unseen
 
     @property
@@ -248,6 +317,8 @@ class Ledger:
             return f"전체 인원: 화면 숫자{freshness} · 팀별 인원·남은 팀: 추정"
         if self.start_teams:
             return f"시작 {self.start_teams}팀 x {self.squad_size}명 가정"
+        if self.top_badge:
+            return f"팀 번호 최대 {self.top_badge}번 기준 {self.top_badge}팀 x {self.squad_size}명 추정"
         return f"관측된 {len(self._known())}팀 기준 (미관측 인원은 생존 가정)"
 
 

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'">
+<title>killfeed-lens ROI</title>
+<link rel="stylesheet" href="node_modules/pretendard/dist/web/variable/pretendardvariable.css">
+<link rel="stylesheet" href="base.css">
+<link rel="stylesheet" href="roi.css">
+</head>
+<body>
+<div id="killfeed" class="box" role="group" aria-label="킬피드 영역">
+  <span class="tag">킬피드</span><i class="cross-h"></i><i class="cross-v"></i>
+  <i class="h nw"></i><i class="h ne"></i><i class="h sw"></i><i class="h se"></i>
+  <span class="size num"></span>
+</div>
+<div id="alive" class="box" role="group" aria-label="생존 인원 숫자 영역">
+  <span class="tag">생존 인원 숫자</span><i class="cross-h"></i><i class="cross-v"></i>
+  <i class="h nw"></i><i class="h ne"></i><i class="h sw"></i><i class="h se"></i>
+  <span class="size num"></span>
+</div>
+
+<section class="guide" role="dialog" aria-labelledby="guide-title">
+  <h1 id="guide-title">화면 영역(ROI) 지정</h1>
+  <p>킬피드는 표시되는 행 전체를, 생존 인원은 숫자만 포함하도록 맞추세요.
+     테두리를 끌면 크기가, 안쪽을 끌면 위치가 바뀝니다.</p>
+  <ul class="keys">
+    <li><kbd>Enter</kbd> 확정</li>
+    <li><kbd>Esc</kbd> 취소</li>
+    <li><kbd>Tab</kbd> 상자 전환</li>
+    <li><kbd>방향키</kbd> 1px 이동 · <kbd>Shift</kbd> 10px</li>
+  </ul>
+  <label class="check"><input id="use-alive" type="checkbox"> 생존 인원 숫자 영역도 지정</label>
+  <p id="warn" class="warn" hidden>capture.monitor가 0이 아닙니다. 영역은 주 모니터 기준이라 어긋날 수 있습니다.</p>
+  <p id="demo" class="aside" hidden>데모 모드: ROI는 저장하지 않고 이번 실행에만 씁니다.</p>
+  <p id="policy" class="aside" hidden>PUBG/KRAFTON의 공식 승인 제품이 아닙니다. 개발은 녹화영상·리플레이·커스텀 매치 우선입니다.</p>
+  <div class="actions">
+    <button id="cancel" type="button" class="btn">취소</button>
+    <button id="ok" type="button" class="btn primary">확정</button>
+  </div>
+</section>
+<script src="roi.js"></script>
+</body>
+</html>

@@ -20,12 +20,21 @@ class Frame:
     image_bgr: np.ndarray
     width: int
     height: int
+    # Region capture: image_bgr is only the part of the width x height screen whose top-left
+    # pixel is at origin (x, y). None: image_bgr is the whole frame.
+    origin: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         if self.width <= 0 or self.height <= 0 or self.seq < 0 or self.captured_at_ns < 0:
             raise ValueError("Frame dimensions and timeline must be valid")
-        if self.image_bgr.shape != (self.height, self.width, 3):
-            raise ValueError("Frame must contain a BGR image matching its dimensions")
+        if self.origin is None:
+            if self.image_bgr.shape != (self.height, self.width, 3):
+                raise ValueError("Frame must contain a BGR image matching its dimensions")
+            return
+        (x, y), shape = self.origin, self.image_bgr.shape
+        if (len(shape) != 3 or shape[2] != 3 or min(x, y) < 0 or not shape[0] or not shape[1]
+                or x + shape[1] > self.width or y + shape[0] > self.height):
+            raise ValueError("Frame region must be a BGR image inside its frame")
 
 
 @dataclass(frozen=True)

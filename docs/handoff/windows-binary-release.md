@@ -29,17 +29,17 @@ portable exe, 로컬 `script/package.ps1`)를 이 저장소의 Python 앱에 옮
 | #   | 결정 | 근거 |
 | --- | --- | --- |
 | D1  | 채널은 **GitHub Releases**(private 저장소 `thsvkd/killfeed-lens`) | 추가 인프라 없음 |
-| D2  | 산출물은 **Windows x64 `killfeed-lens-<version>-setup.exe` + `killfeed-lens-<version>-portable.exe`** 두 개뿐 | ftp-browser 1차와 같은 범위 |
+| D2  | 산출물은 **Windows x64 `killfeed-lens-<version>-setup.exe`** 하나뿐. portable exe는 Electron UI로 바꾸면서 당분간 만들지 않는다 | ftp-browser 1차 범위(설치판 + portable)에서 portable만 보류 |
 | D3  | 설치기는 **Inno Setup, per-user, 관리자 승격 없음**: `PrivilegesRequired=lowest`, `{localappdata}\Programs\killfeed-lens`, 시작 메뉴 바로가기, 선택형 바탕화면 바로가기, 제거 프로그램 | UAC 없이 설치. 버전은 `iscc /DAppVersion=`로 주입 |
 | D4  | 릴리스 트리거는 **`push.tags: v*`뿐**. `workflow_dispatch` 없음 | 태그와 버전의 단일 입구 |
 | D5  | 태그 규칙: `GITHUB_REF_NAME == 'v' + pyproject version` (완전 일치) | `0.1.0`(접두사 없음), `v0.1.0` vs `0.1.1`, `v0.1.0-beta.1` vs `0.1.0` 전부 거부 |
 | D6  | 태그 규칙은 순수 함수 `release_tag_matches_version(tag, version)` 하나(`scripts/release_tag.py`). CI는 같은 파일의 `main()`을 실행 | 규칙을 두 곳에 적지 않는다. 단위 테스트와 CI가 같은 함수를 쓴다 |
 | D7  | 릴리스 잡은 `windows-latest`. **`ci.yml`(테스트)을 `uses:`로 먼저 통과**한 뒤 패키징. 기존 CI 검사 범위는 줄이지 않는다(ubuntu·windows 매트릭스, mypy는 Linux 잡에서만: `pipeline.py`의 fcntl 분기가 POSIX 전용) | 테스트 전 패키징 금지 |
 | D8  | Release는 **즉시 공개**(draft 아님). `permissions: contents: write`는 publish 잡에만 | 최소 권한 |
-| D9  | 업로드는 `softprops/action-gh-release`, 첨부는 `*-setup.exe`, `*-portable.exe`만 | 첨부 glob을 고정·검증 가능 |
-| D10 | 패키징은 **PyInstaller** spec 하나(`packaging/killfeed-lens.spec`): onedir 하나에 `KillfeedLens.exe`(windowed)와 `kfocr.exe`(console)를 함께 두고, portable은 GUI 앱만 onefile windowed | 설치판은 콘솔 CLI도 쓸 수 있게, portable은 단일 파일 |
+| D9  | 업로드는 `softprops/action-gh-release`, 첨부는 `*-setup.exe`만 | 첨부 glob을 고정·검증 가능 |
+| D10 | 패키징은 두 단계다. **PyInstaller** spec 하나(`packaging/killfeed-lens.spec`)가 엔진 onedir(`kfocr.exe`, console)만 만들고, `@electron/packager`(`app/package.mjs`)가 Electron 앱(`KillfeedLens.exe`)을 만들면서 그 onedir를 `resources\killfeed-lens`에 넣는다. tk 창 exe와 portable onefile은 만들지 않는다 | 설치판 하나에 UI와 콘솔 CLI를 함께 둔다. tk GUI는 `kfocr.exe gui --live`로 충분하다 |
 | D11 | PyInstaller는 새 optional extra `package = ["pyinstaller>=6.10,<7"]`로 추가하고 `uv.lock` 갱신 | 런타임 의존성에 섞지 않는다 |
-| D12 | 더블클릭(`KillfeedLens.exe`, 인자 없음) = `kfocr gui --live`: Tk는 메인 스레드, Pipeline은 백그라운드 스레드에서 `GuiSink`로 이벤트 전달 | 사용자 결정 |
+| D12 | 더블클릭(`KillfeedLens.exe`) = Electron UI. UI가 `resources\killfeed-lens\kfocr.exe engine`을 자식 프로세스로 띄우고, 엔진이 live 캡처와 팀 상태를 맡아 보드 스냅샷을 stdout JSON lines로 보낸다(`app/CONTRACT.md`). 이전의 Tk GUI(`kfocr gui --live`, Tk 메인 스레드 + Pipeline 백그라운드 스레드)는 바로가기 없이 CLI로만 남는다 | G004 결정: 같은 방법으로 잰 UI 부담이 Electron 3.4%, tkinter 30.9%(코어 1개 기준) |
 | D13 | 창을 닫으면 캡처 소스의 프레임 루프만 끝내고(`_LiveScreenSource.request_stop`), 카메라 해제·세션 마감은 파이프라인 스레드가 스스로 한다 | dxcam을 다른 스레드에서 grab 중에 해제하지 않는다. `pipeline.py` 무수정 |
 | D14 | 데이터 폴더: frozen 앱은 `%LOCALAPPDATA%\killfeed-lens`(config, SQLite, sessions, logs, roi.yaml), 소스 실행은 기존 `data/` | 설치 폴더·cwd에 쓰지 않는다. 기존 CLI 기본값은 그대로 |
 | D15 | live 상태(준비 중/캡처 중/불안정/오류)는 툴바에 표시하고 `logs\killfeed-lens.log`에도 남긴다. windowed 앱의 stdout/stderr도 같은 로그로 보낸다 | 콘솔 없는 앱에서 오류가 보여야 한다 |
@@ -56,7 +56,7 @@ portable exe, 로컬 `script/package.ps1`)를 이 저장소의 Python 앱에 옮
 
 - **Nuitka / cx_Freeze / Briefcase** — 빌드 시간·설정이 늘고 rapidocr/onnxruntime/dxcam hook 경험이 PyInstaller보다 적다. 기각(D10).
 - **설치판도 onefile** — 매 실행마다 임시 폴더에 수백 MB를 풀어 시작이 느리다. 설치판은 onedir(D10).
-- **GUI와 캡처를 두 프로세스로 띄우고 JSONL로 연결** — 프로세스 수명·오류 전달이 복잡해진다. 한 프로세스 + 스레드(D12).
+- **GUI와 캡처를 두 프로세스로 띄우고 JSONL로 연결** — 프로세스 수명·오류 전달이 복잡해진다. 한 프로세스 + 스레드(D12). 이후 G004에서 Electron UI로 바꾸며 이 방식을 채택했다(지금의 D12, `kfocr engine`).
 - **`source.stop()`을 Tk 스레드에서 직접 호출** — grab 도중 COM 포인터를 해제할 수 있다. 프레임 루프 플래그만 내린다(D13).
 - **CLI 기본 경로를 전부 `%LOCALAPPDATA%`로 변경** — 기존 CLI·테스트 동작이 바뀐다. GUI live 진입점만 데이터 폴더를 쓴다(D14).
 - **NSIS / MSI(WiX)** — per-user 설치·버전 주입은 Inno Setup이 가장 짧다. 기각(D3).
@@ -72,15 +72,17 @@ portable exe, 로컬 `script/package.ps1`)를 이 저장소의 Python 앱에 옮
 | --- | --- |
 | `pyproject.toml`, `uv.lock` | `package` extra 추가. version은 그대로 |
 | (신규) `scripts/release_tag.py` | `release_tag_matches_version` + CI 진입점 `main()` |
-| (신규) `scripts/smoke_packaged.py` | 패키징 산출물 스모크(D17) |
+| (신규) `scripts/smoke_packaged.py` | 패키징 산출물 스모크(D17). 앱 폴더를 받아 `kfocr.exe engine --demo` 스냅샷과 패키지 앱 `--shots`(`app/smoke.mjs`)도 확인 |
 | `scripts/audit_capabilities.py` | finding 경로를 posix로 출력(Windows CI 실패 수정) |
 | (신규) `src/kfocr/ui/live.py` | 데이터 폴더 선택, 파일 로그, live config, `LiveCapture`(스레드·중지·ROI 보정) |
 | `src/kfocr/ui/gui.py` | 툴바 상태 라벨·**ROI 다시 보정** 버튼, `run(live_dir=...)` |
 | `src/kfocr/cli.py` | `kfocr gui --live` |
-| (신규) `packaging/entry.py` | frozen 진입점. 인자 없는 `KillfeedLens.exe`는 `gui --live`, windowed stdio → 로그 |
-| (신규) `packaging/killfeed-lens.spec` | onedir(`KillfeedLens.exe` + `kfocr.exe`) + portable onefile |
-| (신규) `packaging/killfeed-lens.iss` | Inno Setup per-user 설치기 |
-| (신규) `script/_common.ps1`, `script/package.ps1` | 로컬 패키징(빌드 → 스모크 → 설치기) |
+| (신규) `packaging/entry.py` | frozen 진입점(`kfocr.exe`, console = `kfocr` CLI). 콘솔 없이 실행되면 없는 stdio만 로그로 |
+| (신규) `packaging/killfeed-lens.spec` | 엔진 onedir(`kfocr.exe`). tk 창 exe·portable onefile 없음 |
+| `app/`, `app/package.mjs` | Electron UI와 패키징(`@electron/packager` + `@electron/fuses`, 엔진 onedir를 `resources\killfeed-lens`로) |
+| `src/kfocr/ui/engine.py` | `kfocr engine`: live 캡처·팀 상태 → 보드 스냅샷(stdout), 명령(stdin) |
+| (신규) `packaging/killfeed-lens.iss` | Inno Setup per-user 설치기. Electron 앱 폴더(`dist\KillfeedLens-win32-x64`, 엔진 포함)를 설치 |
+| (신규) `script/_common.ps1`, `script/package.ps1` | 로컬 패키징(엔진 빌드 → `npm ci` → Electron 패키징·fuses → 스모크 → 설치기) |
 | `.github/workflows/ci.yml` | `workflow_call` 추가. 기존 범위 유지: ubuntu·windows 매트릭스에서 ruff(`src tests scripts`)·pytest·audit, mypy는 Linux 잡에서만. Windows 전용 패키징 스모크 잡 추가 |
 | (신규) `.github/workflows/release.yml` | 태그 트리거 릴리스 |
 | `README.md` | 설치 섹션(어떤 파일을 받는지, SmartScreen) |
@@ -109,7 +111,7 @@ portable exe, 로컬 `script/package.ps1`)를 이 저장소의 Python 앱에 옮
 - release 트리거는 `push.tags: [v*]`뿐이고 `workflow_dispatch`가 없다
 - release는 `ci.yml`을 먼저 통과하고, `contents: write`는 publish 잡에만 있다
 - ci 테스트 잡은 ubuntu·windows 매트릭스이고, ruff는 `scripts`까지 보며, mypy는 Linux 잡에서만 돈다
-- 첨부 glob은 `*-setup.exe`, `*-portable.exe` 두 개뿐이고 draft가 아니다
+- 첨부 glob은 `*-setup.exe` 하나뿐이고 draft가 아니다
 - `.iss`는 `PrivilegesRequired=lowest`, `{localappdata}\Programs\killfeed-lens`
 
 ---
@@ -118,7 +120,7 @@ portable exe, 로컬 `script/package.ps1`)를 이 저장소의 Python 앱에 옮
 
 1. `dxcam`은 `importlib.metadata.version("dxcam")`을 읽는다(`screen.py`의 패치 가드). frozen 앱에 dist-info가 없으면 live 캡처가 즉시 실패하므로 spec에서 `copy_metadata("dxcam")`이 필요하다.
 2. `rapidocr_onnxruntime`의 `config.yaml`과 `models/*.onnx`는 데이터 파일이다. `collect_data_files`를 빼면 OCR 생성자가 frozen 앱에서만 실패한다. 스모크의 `replay`가 이를 잡는다.
-3. windowed PyInstaller 앱은 `sys.stdout`/`sys.stderr`가 `None`이다. `packaging/entry.py`가 로그 파일로 돌린다.
+3. 콘솔 없이 실행된 PyInstaller 앱은 `sys.stdout`/`sys.stderr`가 `None`일 수 있다. `packaging/entry.py`는 `None`인 스트림만 로그 파일로 돌리고, 엔진이 스냅샷을 쓰는 stdout 파이프는 그대로 둔다.
 4. `Pipeline`은 `subprocess`로 `git rev-parse`를 부른다. windowed 앱에서는 세션 시작 때 콘솔 창이 한 번 깜빡일 수 있다(`pipeline.py`는 이번 작업에서 건드리지 않는다).
 5. PUBG UI 패치 2026-10용 아이콘 템플릿을 `src/kfocr/assets/icons/2026-10`(패키지 데이터; wheel·PyInstaller `collect_data_files("kfocr")` 모두 포함)에 번들한다. 데이터 폴더의 `config.yaml`에 `vision.icon_template_dir`가 없으면 GUI live 모드(`live_config`)만 이 디렉터리를 쓰고, 명시한 설정이 항상 우선한다. `config.py` 전역 기본값은 바꾸지 않는다: CLI·benchmark·테스트의 "검증된 템플릿 없음 ⇒ unknown" 의미를 유지하기 위해서다. UI 패치가 바뀌면 템플릿을 다시 수집해 이 디렉터리를 교체한다.
 6. 버전은 `pyproject.toml`과 `src/kfocr/__init__.py`(`__version__`) 두 곳에 있다. 태그 규칙은 pyproject만 본다. 버전을 올릴 때 둘을 함께 바꾼다.

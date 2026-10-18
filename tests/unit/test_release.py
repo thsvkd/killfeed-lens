@@ -41,7 +41,7 @@ def test_live_config_uses_the_bundled_icon_templates_unless_the_config_names_its
     assert Path(live_config(tmp_path).vision.icon_template_dir) == (tmp_path / "mine").resolve()
 
 
-def test_release_workflow_runs_ci_on_v_tags_and_publishes_only_the_two_exes() -> None:
+def test_release_workflow_runs_ci_on_v_tags_and_publishes_only_the_installer() -> None:
     text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     workflow = yaml.safe_load(text)
     triggers = workflow[True]  # YAML 1.1 reads the bare `on` key as True
@@ -54,8 +54,7 @@ def test_release_workflow_runs_ci_on_v_tags_and_publishes_only_the_two_exes() ->
     assert [name for name, job in jobs.items() if "permissions" in job] == ["publish-release"]
     publish = jobs["publish-release"]["steps"][-1]
     assert publish["uses"].startswith("softprops/action-gh-release@")
-    assert publish["with"]["files"].split() == ["release-assets/*-setup.exe",
-                                                "release-assets/*-portable.exe"]
+    assert publish["with"]["files"].split() == ["release-assets/*-setup.exe"]  # no portable for now
     assert "draft" not in publish["with"] and "workflow_dispatch" not in text
     assert "scripts/release_tag.py" in text
 

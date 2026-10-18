@@ -24,6 +24,19 @@ def format_report(report: dict[str, Any]) -> str:
     tracking = report.get("tracking", {})
     counts = report.get("sample_counts", {})
     coverage = report.get("evaluation_coverage", {})
+    teams = report.get("team_state", {}).get("summary")
+
+    def trio(rates: dict[str, float]) -> str:
+        return " ".join(f"{key}={_percent(rates[key])}" for key in ("dead", "kills", "eliminated"))
+
+    team_line = [] if not teams else [
+        f"team state ({teams['checkpoints']} checkpoints, {teams['team_checks']} team checks): "
+        f"vs truth {trio(teams['vs_truth'])} | vs perfect reading {trio(teams['vs_oracle'])} | "
+        f"ceiling {trio(teams['oracle_vs_truth'])} | teams_left in range "
+        f"{_percent(teams['teams_left_in_range'])} (ceiling "
+        f"{_percent(teams['oracle_teams_left_in_range'])}; "
+        f"{teams.get('teams_left_unknown', 0)} checkpoints shown as unknown)"
+    ]
     return "\n".join(
         [
             "Validation report",
@@ -54,6 +67,7 @@ def format_report(report: dict[str, Any]) -> str:
                 f"telemetry={coverage.get('telemetry_evaluated', 0)}/"
                 f"{coverage.get('telemetry_total', counts.get('telemetry', 0))}"
             ),
+            *team_line,
         ]
     )
 

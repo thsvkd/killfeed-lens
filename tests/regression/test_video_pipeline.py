@@ -47,16 +47,17 @@ def _write_synthetic_killfeed_video(path, marker: np.ndarray) -> None:
     assert writer.isOpened()
     for frame_index in range(20):
         frame = np.full((240, 1280, 3), 24, dtype=np.uint8)
-        cv2.putText(
-            frame,
-            "AAAA",
-            (40, 155),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            3,
-            (255, 255, 255),
-            5,
-            cv2.LINE_AA,
-        )
+        for index, letter in enumerate("AAAA"):  # killfeed glyphs never touch across a name
+            cv2.putText(
+                frame,
+                letter,
+                (40 + 75 * index, 155),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                3,
+                (255, 255, 255),
+                5,
+                cv2.LINE_AA,
+            )
         frame[75:155, 570:650] = marker[:, :, None]
         cv2.putText(
             frame,

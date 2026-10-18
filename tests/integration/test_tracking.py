@@ -155,6 +155,32 @@ def test_tracker_expires_gap_then_allows_a_later_identical_event() -> None:
     assert len(tracker.update([event(105)], 10_500_000_000)) == 1
 
 
+def test_tracker_is_pending_only_while_a_new_row_waits_for_its_confirming_frame() -> None:
+    tracker = TemporalTracker(session_id=uuid4())
+    assert not tracker.pending
+    tracker.update([event(1)], 100_000_000)
+    assert tracker.pending  # first sighting: read the next frame too
+    assert len(tracker.update([event(2)], 200_000_000)) == 1
+    assert not tracker.pending  # emitted
+    tracker.update([event(3, victim_name="Charlie")], 300_000_000)
+    tracker.update([], 400_000_000)
+    assert not tracker.pending  # the new row was not seen in the last update
+
+
+def test_tracker_keeps_simultaneous_rows_whose_victims_are_only_alike() -> None:
+    # Clanmates "Kilo-0870" and "Milo-0870" killed by one player sit on screen together.
+    tracker = TemporalTracker(session_id=uuid4())
+
+    def rows(frame: int) -> list[CandidateEvent]:
+        return [event(frame, 20, victim_name="Kilo-0870", visual_fingerprint="a"),
+                event(frame, 50, victim_name="Milo-0870", visual_fingerprint="b")]
+
+    assert tracker.update(rows(1), 100_000_000) == []
+    emitted = tracker.update(rows(2), 200_000_000)
+
+    assert sorted(e.victim_name for e in emitted) == ["Kilo-0870", "Milo-0870"]
+
+
 def test_tracker_suppresses_drifting_spelling_of_an_already_emitted_row() -> None:
     tracker = TemporalTracker(session_id=uuid4())
     assert tracker.update([event(1)], 100_000_000) == []
@@ -189,6 +215,63 @@ def test_tracker_crops_the_row_where_it_is_when_confirmed() -> None:
     emitted = tracker.update([event(2, 55, confidence_total=0.90)], 200_000_000)
     assert emitted[0].source_bbox == (0, 55, 200, 20)
 
+
+def test_tracker_waits_for_a_new_rows_badges_once_the_match_shows_badges() -> None:
+    tracker = TemporalTracker(session_id=uuid4())
+    shown = event(1, 200, killer_name="Other", victim_name="Rival", killer_team=3, victim_team=5)
+    tracker.update([shown], 100_000_000)
+    tracker.update([replace(shown, frame_seq=2)], 200_000_000)
+    # The new row's badges show a few frames after its names; a misread one is outvoted.
+    rows = [event(3), event(4, killer_team=7), event(5, killer_team=8),
+            event(6, killer_team=8, victim_team=9)]
+    held = [tracker.update([row], row.frame_seq * 100_000_000) for row in rows[:3]]
+    assert held == [[], [], []] and tracker.pending
+    [out] = tracker.update([rows[3]], 600_000_000)
+    assert (out.killer_team, out.victim_team, out.observed_at_ns) == (8, 9, 300_000_000)
+
+    # A held row that drops out of the reads is still confirmed once the wait is over; on a badge
+    # tie the later read wins.
+    lost = TemporalTracker(session_id=uuid4())
+    for frame, row in enumerate((shown, replace(shown, frame_seq=2), event(3, killer_team=7),
+                                 event(4, killer_team=8)), 1):
+        lost.update([row], frame * 100_000_000)
+    assert lost.update([], 700_000_000) == []
+    [late] = lost.update([], 900_000_000)
+    assert (late.observed_at_ns, late.killer_team, late.victim_team) == (300_000_000, 8, None)
+
+    solo = TemporalTracker(session_id=uuid4())  # no badges in the match: confirm right away
+    solo.update([event(1)], 100_000_000)
+    assert len(solo.update([event(2)], 200_000_000)) == 1
+
+
+
+def _badged_tracker(**settings: int) -> TemporalTracker:
+    tracker = TemporalTracker(session_id=uuid4(), **settings)
+    shown = event(1, 200, killer_name="Other", victim_name="Rival", killer_team=3, victim_team=5)
+    tracker.update([shown], 100_000_000)
+    tracker.update([replace(shown, frame_seq=2)], 200_000_000)
+    return tracker
+
+
+def test_a_held_row_that_drops_out_is_not_taken_for_its_alike_neighbour() -> None:
+    tracker = _badged_tracker()
+    def kilo(frame: int) -> CandidateEvent:
+        return event(frame, 20, victim_name="Kilo-0870", visual_fingerprint="a", killer_team=1, victim_team=2)
+    emitted = []
+    for frame in (3, 4):  # together on screen; the lower row's badges are not read yet
+        emitted += tracker.update([kilo(frame), event(frame, 50, victim_name="Milo-0870", visual_fingerprint="b")],
+                                  frame * 100_000_000)
+    for frame in range(5, 10):  # the held row drops out of the reads, its neighbour stays
+        emitted += tracker.update([kilo(frame)], frame * 100_000_000)
+    assert sorted(e.victim_name for e in emitted) == ["Kilo-0870", "Milo-0870"]
+
+
+def test_a_held_row_confirms_before_a_short_max_gap_expires_it() -> None:
+    tracker = _badged_tracker(max_gap_ms=300)
+    tracker.update([event(3, killer_team=7)], 300_000_000)
+    tracker.update([event(4, killer_team=7)], 400_000_000)
+    emitted = [e for ns in range(450_000_000, 950_000_000, 50_000_000) for e in tracker.update([], ns)]
+    assert [(e.killer_team, e.observed_at_ns) for e in emitted] == [(7, 300_000_000)]
 
 def test_same_player_merges_ocr_drift_but_not_numbered_teammates() -> None:
     from kfocr.domain.tracker import _same_player

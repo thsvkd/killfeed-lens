@@ -13,8 +13,10 @@ from kfocr.domain.models import NormalizedRect
 
 @dataclass
 class CaptureConfig:
-    sample_fps: float = 12
-    inference_fps_cap: float = 4
+    # ROI-only capture costs ~1 ms CPU per frame, so 30 Hz keeps a new row's first sighting within
+    # ~33 ms; the ink change gate (vision.change) and the 400 ms refresh decide which frames are read.
+    sample_fps: float = 30
+    inference_fps_cap: float = 30  # effective cap is min(this, sample_fps)
     monitor: int = 0
 
 
@@ -63,12 +65,12 @@ class TelemetryConfig:
 
 @dataclass
 class VisionConfig:
-    change_threshold: float = 0.02
+    change_threshold: float = 0.008  # share of ROI pixels whose stable ink changed
     icon_template_dir: str | None = None
 
 
 def inference_timing_ms(capture: CaptureConfig, tracker: TrackerConfig) -> tuple[float, float, float]:
-    interval = 1000 / capture.inference_fps_cap
+    interval = 1000 / min(capture.inference_fps_cap, capture.sample_fps)
     refresh = max(interval, min(400, tracker.max_gap_ms * 0.8))
     return interval, refresh, refresh + 1000 / capture.sample_fps
 
@@ -97,9 +99,7 @@ class AppConfig:
 
     def validate(self) -> None:
         _number(self.capture.sample_fps, 1, 60, "capture.sample_fps")
-        _number(self.capture.inference_fps_cap, 0.1, 4, "capture.inference_fps_cap")
-        if self.capture.inference_fps_cap > self.capture.sample_fps:
-            raise ValueError("Inference FPS cannot exceed capture FPS")
+        _number(self.capture.inference_fps_cap, 0.1, 60, "capture.inference_fps_cap")
         _integer(self.capture.monitor, 0, 64, "capture.monitor")
         _integer(self.tracker.evidence_frames, 2, 100, "tracker.evidence_frames")
         _integer(self.tracker.evidence_window_ms, 1, 10000, "tracker.evidence_window_ms")

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from uuid import UUID, uuid4
@@ -12,6 +14,10 @@ from kfocr.domain.models import CandidateEvent, ConfirmedEvent, EventType
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 # ponytail: a killfeed row stays about 6 s on screen; retune if PUBG changes the feed duration.
 _DUPLICATE_WINDOW_NS = 10_000_000_000
+# A new row's team badges read 200-300 ms after its names (frame by frame on 1440p OBS footage),
+# so a row with a named side still unbadged waits this long once the match has shown badges.
+# ponytail: measured on two matches; it adds up to this much confirm latency to those rows.
+_BADGE_WAIT_NS = 500_000_000
 
 
 def _normalized(value: str | None) -> str:
@@ -67,6 +73,13 @@ def same_teammate(left: str | None, right: str | None) -> bool:
     return len(short) >= 4 and short in long and re.search(r"[a-z]", long.replace(short, "", 1)) is not None
 
 
+def _most_seen(teams: Iterable[int | None]) -> int | None:
+    """Badges flicker between frames on compressed video: the most seen one wins, the first
+    given on a tie (pass the latest first: a row still fading in reads worst)."""
+    votes = Counter(team for team in teams if team is not None).most_common(1)
+    return votes[0][0] if votes else None
+
+
 def _center_y(candidate: CandidateEvent) -> float:
     return (candidate.source_bbox[1] + candidate.source_bbox[3]) / 2
 
@@ -78,7 +91,9 @@ class _Track:
     representative: CandidateEvent
     latest: CandidateEvent
     evidence: list[tuple[int, CandidateEvent]] = field(default_factory=list)
+    seen_ns: set[int] = field(default_factory=set)  # every update that read this row
     emitted: bool = False
+    held: bool = False  # confirmable but waiting for its badges (_BADGE_WAIT_NS)
 
 
 class TemporalTracker:
@@ -101,21 +116,40 @@ class TemporalTracker:
         self.max_gap_ns = max_gap_ms * 1_000_000
         self.confirmed_min = confirmed_min
         self.candidate_min = candidate_min
+        # A held row must confirm before it can expire.
+        self._badge_wait_ns = min(_BADGE_WAIT_NS, self.max_gap_ns)
         self._tracks: list[_Track] = []
-        self._recent: list[tuple[int, EventType, str | None, str | None]] = []
+        self._recent: list[tuple[int, EventType, str | None, _Track]] = []
+        self._last_update_ns: int | None = None
+        self._badged = False  # some row showed a badge: not solo, so unbadged rows are unread
+
+    @property
+    def pending(self) -> bool:
+        """A row seen in the last update still waits for its confirming frame, so the caller should
+        read the next frame even if the feed looks unchanged (bounded by the evidence window)."""
+        return any(
+            not track.emitted
+            and track.last_seen_ns == self._last_update_ns
+            and track.last_seen_ns - track.first_seen_ns <= self.evidence_window_ns
+            for track in self._tracks
+        )
 
     def update(
         self, candidates: list[CandidateEvent], observed_at_ns: int
     ) -> list[ConfirmedEvent]:
+        self._last_update_ns = observed_at_ns
         # ponytail: after a long blind streak (OCR failures, black frames, capture loss) expire
         # anyway, trading a possible duplicate for not swallowing a new identical event; retune
-        # the 4x max_gap cap against real footage.
+        # the 4x max_gap cap against real footage. A held row was confirmed already and emits now.
         self._tracks = [
             track
             for track in self._tracks
             if observed_at_ns - track.last_seen_ns <= 4 * self.max_gap_ns
+            or (track.held and not track.emitted)
         ]
         eligible = [item for item in candidates if item.confidence_total >= self.candidate_min]
+        self._badged = self._badged or any(
+            item.killer_team is not None or item.victim_team is not None for item in eligible)
 
         assignments: list[tuple[float, int, int]] = []
         for track_index, track in enumerate(self._tracks):
@@ -133,13 +167,6 @@ class TemporalTracker:
             used_candidates.add(candidate_index)
             self._observe(self._tracks[track_index], eligible[candidate_index], observed_at_ns)
 
-        # Expire only rows missing from this successful observation; failed inference never
-        # calls update, so it cannot make a still-visible emitted row look new again.
-        self._tracks = [
-            track
-            for track in self._tracks
-            if observed_at_ns - track.last_seen_ns <= self.max_gap_ns
-        ]
         for candidate_index, candidate in enumerate(eligible):
             if candidate_index not in used_candidates:
                 self._tracks.append(
@@ -149,18 +176,20 @@ class TemporalTracker:
                         representative=candidate,
                         latest=candidate,
                         evidence=[(observed_at_ns, candidate)],
+                        seen_ns={observed_at_ns},
                     )
                 )
 
         emitted: list[ConfirmedEvent] = []
         for track in self._tracks:
-            # Only a track seen in this frame may emit, so the crop and frame refer to it.
-            if track.emitted or track.last_seen_ns != observed_at_ns:
+            # Only a track seen in this frame may emit, so the crop and frame refer to it; a row
+            # held for its badges may have dropped out of the reads meanwhile and emits anyway.
+            if track.emitted or (track.last_seen_ns != observed_at_ns and not track.held):
                 continue
             track.evidence = [
                 item
                 for item in track.evidence
-                if observed_at_ns - item[0] <= self.evidence_window_ns
+                if track.last_seen_ns - item[0] <= self.evidence_window_ns
             ]
             # Evidence counts per exact name pair: fuzzy matching keeps one track, but the
             # emitted spelling must itself repeat.
@@ -191,25 +220,36 @@ class TemporalTracker:
                 or candidate.victim_name is None
             ):
                 continue
+            newest = [seen for _, seen in reversed(track.evidence)]
+            killer_team = _most_seen(seen.killer_team for seen in newest)
+            victim_team = _most_seen(seen.victim_team for seen in newest)
+            if self._badged and observed_at_ns - track.first_seen_ns < self._badge_wait_ns and (
+                    killer_team is None or victim_team is None):
+                track.held = True  # still pending, so the caller reads the next frame
+                continue
             track.emitted = True
             # A row whose spelling drifted can lose its track and come back as a new one. A player
             # dies once and a revive takes ~10 s, so the same victim within the window is the same
             # event even when the killer reads differently (lost clan brackets, glued badge).
+            # An earlier row on screen together with this one (read in its last frame) with a
+            # merely similar victim is a different row ("Kilo-0870"/"Milo-0870" killed
+            # together); an identical one is the same kill shown twice.
             self._recent = [
                 item for item in self._recent if observed_at_ns - item[0] <= _DUPLICATE_WINDOW_NS
             ]
             if any(
                 (kind is candidate.event_type or EventType.UNKNOWN in (kind, candidate.event_type))
                 and _same_player(victim, candidate.victim_name)
-                for _, kind, _killer, victim in self._recent
+                and (track.last_seen_ns not in other.seen_ns
+                     or name_key(victim) == name_key(candidate.victim_name))
+                for _, kind, victim, other in self._recent
             ):
                 continue
-            self._recent.append(
-                (observed_at_ns, candidate.event_type, candidate.killer_name, candidate.victim_name)
-            )
+            self._recent.append((observed_at_ns, candidate.event_type, candidate.victim_name, track))
             track.representative = candidate
             values = dict(candidate.__dict__)
             values["confidence_total"] = confidence
+            values["killer_team"], values["victim_team"] = killer_team, victim_team
             values["observed_at_ns"] = track.first_seen_ns
             # Rows scroll: crop where the row is now, not where the best frame saw it.
             values["source_bbox"] = track.latest.source_bbox
@@ -223,12 +263,21 @@ class TemporalTracker:
                     tracker_evidence_count=evidence_count,
                 )
             )
+        # Expire only rows missing from this successful observation; failed inference never
+        # calls update, so it cannot make a still-visible emitted row look new again. A held row
+        # outlives this: _badge_wait_ns <= max_gap_ns, so it emits first.
+        self._tracks = [
+            track
+            for track in self._tracks
+            if observed_at_ns - track.last_seen_ns <= self.max_gap_ns
+        ]
         return emitted
 
     def _observe(
         self, track: _Track, candidate: CandidateEvent, observed_at_ns: int
     ) -> None:
         track.last_seen_ns = observed_at_ns
+        track.seen_ns.add(observed_at_ns)
         if candidate.frame_seq != track.latest.frame_seq:
             track.evidence.append((observed_at_ns, candidate))
         track.latest = candidate

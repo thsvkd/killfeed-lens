@@ -30,6 +30,13 @@ jobs:
       - name: Check tag matches pyproject version
         run: uv run --no-project python scripts/release_tag.py
 
+      - name: Setup Node (Electron app)
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
       - name: Ensure Inno Setup
         shell: pwsh
         run: |
@@ -45,9 +52,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: release-win-x64
-          path: |
-            dist/*-setup.exe
-            dist/*-portable.exe
+          path: dist/*-setup.exe
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -70,7 +75,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+          # The portable exe is dropped while the Electron UI settles; only the installer ships.
+          body: 설치 파일만 배포합니다. Electron UI로 바뀌면서 portable exe는 당분간 제공하지 않습니다.
           fail_on_unmatched_files: true
-          files: |
-            release-assets/*-setup.exe
-            release-assets/*-portable.exe
+          files: release-assets/*-setup.exe

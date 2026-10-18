@@ -46,6 +46,13 @@ def _canonical_name(raw: str) -> str | None:
     return max(names, key=_name_rank, default=None)
 
 
+def nickname(raw: str) -> str | None:
+    """One name crop's recognition read in the PUBG alphabet: clan tags dropped, then "." and " "
+    (recognition's usual readings of "_") mapped to "_" and any other character removed."""
+    name = _CLAN_TAG.sub("", raw).strip().replace(".", "_").replace(" ", "_")
+    return _NOT_NAME_CHAR.sub("", name) or None
+
+
 def _name_rank(name: str | None) -> tuple[bool, int]:
     # All-digit leftovers are usually HUD counters, so a name with letters wins.
     return (name is not None and len(name) >= 4 and not name.isdigit(), len(name or ""))

@@ -23,6 +23,17 @@ def test_roi_box_edges_resize_and_interior_moves_within_the_screen() -> None:
     assert rect.x + rect.w <= 1 and rect.y + rect.h <= 1
 
 
+def test_overlay_stays_unmapped_until_there_is_something_to_show():
+    from kfocr.domain.models import AliveCount
+    from kfocr.ui.gui import overlay_has_content
+    from kfocr.ui.teams import Ledger
+
+    ledger = Ledger()
+    assert not overlay_has_content(ledger)  # only "waiting": no window over the game
+    ledger.observe_alive_count(AliveCount(97, 0, 0))
+    assert overlay_has_content(ledger)
+
+
 def test_overlay_placement_keeps_both_rois_uncovered():
     from kfocr.ui.gui import clear_of_rois
 

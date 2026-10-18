@@ -244,6 +244,80 @@ def test_map_telemetry_resolves_kill_only_when_actor_fields_agree():
     assert mapped[0].actor_candidates == ["Actor"]
 
 
+def test_map_telemetry_drops_knocks_out_of_the_viewers_feed_range():
+    def at(name: str, team: int, x: float) -> dict:
+        return {"name": name, "teamId": team, "location": {"x": x, "y": 0.0}}
+
+    def knock(second: int, victim_x: float) -> dict:
+        return {"_T": "LogPlayerMakeGroggy", "_D": f"2026-10-06T12:00:{second:02d}Z",
+                "attacker": _character("A"), "victim": at(f"V{second}", 2, victim_x)}
+
+    events = [
+        {"_T": "LogPlayerPosition", "_D": "2026-10-06T12:00:00Z", "character": at("Me", 1, 0.0)},
+        {"_T": "LogPlayerPosition", "_D": "2026-10-06T12:00:00Z",
+         "character": at("Mate", 1, 300_000.0)},
+        knock(10, 90_000.0),  # 900 m from Me
+        knock(11, 200_000.0),  # 1,000 m from Mate
+        knock(12, 150_000.0),  # 1,500 m from both
+        {"_T": "LogPlayerKillV2", "_D": "2026-10-06T12:00:13Z", "victim": at("Far", 2, 150_000.0),
+         "killer": _character("A"), "dBNOMaker": None, "finisher": _character("A")},
+    ]
+
+    assert [e.victim for e in map_telemetry(events, viewer="Me")] == ["V10", "V11", "Far"]
+    assert len(map_telemetry(events)) == 4
+    assert len(map_telemetry(events, viewer="Unknown")) == 4
+
+
+def test_team_state_report_scores_the_board_against_telemetry_by_player_names():
+    from dataclasses import replace
+
+    from kfocr.telemetry.team_state import team_state_report
+
+    session = _session(ended_at_utc=datetime(2026, 10, 6, 12, 2, 10, tzinfo=UTC))
+    roster = [("Alpha", 1), ("Bravo", 1), ("Echo", 1), ("Fox", 1),
+              ("Hunter", 2), ("Ivy", 2), ("Jade", 2), ("Kilo", 2)]
+    raw = [{"_T": "LogMatchStart", "_D": "2026-10-06T12:00:00Z",
+            "characters": [{"character": {"name": n, "teamId": t}} for n, t in roster]}]
+    raw += [{"_T": "LogPlayerKillV2", "_D": f"2026-10-06T12:00:{s}Z", "killer": {"name": "Hunter"},
+             "victim": {"name": v}} for s, v in ((10, "Alpha"), (20, "Bravo"), (30, "Echo"), (40, "Fox"))]
+    # Badges 7/5 are on screen; the glued "7Alpha" still maps to Alpha. The board misses Fox.
+    observed = [replace(_observed(session, s, "Hunter", v), killer_team=5, victim_team=7)
+                for s, v in ((10, "7Alpha"), (20, "Bravo"), (30, "Echo"))]
+
+    report = team_state_report(session, observed, raw, map_telemetry(raw), offset_seconds=0.0)
+
+    half = {"dead": 0.5, "kills": 0.5, "eliminated": 0.5}
+    assert report["summary"] == {
+        "checkpoints": 3, "team_checks": 6, "vs_truth": half, "vs_oracle": half,
+        "oracle_vs_truth": {"dead": 1.0, "kills": 1.0, "eliminated": 1.0},
+        "teams_left_in_range": 0.0, "teams_left_unknown": 0,
+        "oracle_teams_left_in_range": 1.0}
+    last = report["checkpoints"][-1]
+    # Teams up to the highest badge (7); badge 7 may be an underfilled wiped squad and two of the
+    # never-seen badges may be lobby leavers.
+    assert last["teams_left"] == [[4, 7], 1] and last["oracle_teams_left"] == [1, 1]
+    assert last["mismatched_teams"] == [
+        {"telemetry_team": 1, "board_badges": [7], "dead": [3, 4], "kills": [0, 0],
+         "eliminated": [False, True], "oracle": [4, 0, True]},
+        {"telemetry_team": 2, "board_badges": [5], "dead": [0, 0], "kills": [3, 4],
+         "eliminated": [False, False], "oracle": [0, 4, False]}]
+
+
+def test_team_state_counts_a_recalled_player_as_alive_again():
+    from kfocr.telemetry.team_state import _timeline, _truth_at
+
+    raw = [{"_T": "LogPlayerKillV2", "_D": "2026-10-06T12:00:10Z", "victim": {"name": "A"},
+            "killer": {"name": "B"}},
+           {"_T": "LogPlayerCreate", "_D": "2026-10-06T12:00:40Z", "character": {"name": "A"}}]
+    timeline = _timeline(raw)
+    status, *_ = _truth_at(timeline, set(), {"A": 1, "B": 2},
+                           datetime(2026, 10, 6, 12, 0, 20, tzinfo=UTC))
+    assert status["A"].value == "dead"
+    status, *_ = _truth_at(timeline, set(), {"A": 1, "B": 2},
+                           datetime(2026, 10, 6, 12, 0, 50, tzinfo=UTC))
+    assert status["A"].value == "alive"
+
+
 def test_map_telemetry_rejects_supported_event_with_malformed_timestamp():
     with pytest.raises(ValueError, match=r"index 0.*_D"):
         map_telemetry(

@@ -32,6 +32,7 @@ TEXT, DIM, FAINT = "#E6EDF3", "#8B949E", "#4C5560"
 ALIVE, KNOCK, DEAD, HOT, KILLC = "#56B4E9", "#E69F00", "#6E7681", "#F0E442", "#F78166"
 FLASH_S = 4.0  # how long a fresh change stays highlighted
 OVERLAY_W, CARDS_SIZE = 264, (1040, 780)
+POLL_MS, HOUSEKEEP_S = 16, 0.08  # event queue: about once per display frame; redraws otherwise
 HOTKEY_LABEL = "Ctrl+Alt+O"
 VERB = {EventType.KILL: "처치", EventType.KNOCK: "기절", EventType.FINISH: "마무리",
         EventType.BLEEDOUT: "출혈사", EventType.SUICIDE: "자살", EventType.ENVIRONMENT: "환경사",
@@ -167,6 +168,13 @@ def _waiting(c: tk.Canvas, w: int, y: int) -> int:
 
 # --- overlay: narrow always-on-top strip ----------------------------------------------------------------------
 OVERLAY_ROWS = 12
+
+
+def overlay_has_content(led: Ledger) -> bool:
+    """Before the first event or HUD reading the overlay would only say "waiting". It stays
+    unmapped then: any visible topmost window over a borderless game makes DWM compose the game's
+    frames instead of letting them flip straight to the screen."""
+    return bool(led.recent or led.teams or led.alive_count)
 
 
 def draw_overlay(c: tk.Canvas, led: Ledger, w: int, now: float) -> int:
@@ -526,6 +534,7 @@ def clear_of_rois(box: tuple[float, float, float, float],
 # --- ROI box: a live selection frame over the game ------------------------------------------
 GRIP, ROI_MIN = 8, 24  # px: edge band that resizes; smallest box side
 ROI_DEFAULT = NormalizedRect(0.68, 0.0, 0.31, 0.2)  # PUBG killfeed corner, top-right
+ALIVE_DEFAULT = NormalizedRect(0.92, 0.01, 0.04, 0.04)  # HUD alive count, top-right
 ROI_LINE, ROI_FILL, ROI_KEY = "#58A6FF", "#1F3A5F", "#FF00FE"  # key: see-through colour
 _CURSOR = {"n": "size_ns", "s": "size_ns", "e": "size_we", "w": "size_we", "nw": "size_nw_se",
            "se": "size_nw_se", "ne": "size_ne_sw", "sw": "size_ne_sw", "": "fleur"}
@@ -706,6 +715,7 @@ class App:
         self.roi, self.live = roi, live
         self._rois: tuple[NormalizedRect | None, NormalizedRect | None] = (None, None)
         self.dirty, self._second, self._overlay_h = True, -1, 0
+        self._overlay_wanted, self._housekept = False, 0.0
         root.title("killfeed-lens · 팀 현황")
         root.configure(bg=BG)
         root.geometry(f"{CARDS_SIZE[0]}x{CARDS_SIZE[1]}+80+40")
@@ -781,26 +791,40 @@ class App:
 
     @property
     def overlay_on(self) -> bool:
+        """The user's choice (button, Ctrl+Alt+O); the window is mapped only while it has content."""
+        return self._overlay_wanted
+
+    @property
+    def _overlay_shown(self) -> bool:
         return self.top.state() == "normal"
 
     def toggle_overlay(self) -> None:
         self.set_overlay(not self.overlay_on)
 
     def set_overlay(self, show: bool) -> None:
+        self._overlay_wanted = show
+        self._sync_overlay()
+        self.toggle.configure(text="오버레이 끄기" if show else "오버레이 켜기")
+        self.dirty = True
+
+    def _sync_overlay(self) -> None:
+        show = self._overlay_wanted and overlay_has_content(self.led)
+        if show == self._overlay_shown:
+            return
         if show:
             self.top.deiconify()  # never focus_force: the game must keep keyboard input
             pin_on_top(self.top)
+            self._overlay_h = 0  # remeasure on the next redraw
+            self.dirty = True
         else:
             self.top.withdraw()
-        self.toggle.configure(text="오버레이 끄기" if show else "오버레이 켜기")
-        self.dirty = True
 
     def redraw(self, now: float) -> None:
         c = self.canvas
         c.delete("all")
         h = draw_cards(c, self.led, max(c.winfo_width(), 400), now)
         c.configure(scrollregion=(0, 0, c.winfo_width(), max(h, c.winfo_height())))
-        if self.overlay_on:
+        if self._overlay_shown:
             self.ov.delete("all")
             h = draw_overlay(self.ov, self.led, OVERLAY_W, now)
             if h != self._overlay_h:
@@ -821,6 +845,12 @@ class App:
         except queue.Empty:
             pass
         now = time.monotonic()
+        # New events are drawn on the next poll (<= POLL_MS); otherwise redraw every HOUSEKEEP_S.
+        if not changed and now - self._housekept < HOUSEKEEP_S:
+            self.root.after(POLL_MS, self.poll)
+            return
+        self._housekept = now
+        self._sync_overlay()
         self.led.tick(now)
         if self.live and self.status["text"] != self.live.status:
             self.status.configure(text=self.live.status, fg=KILLC if self.live.error else TEXT)
@@ -831,7 +861,7 @@ class App:
         if self.hotkey.pressed.is_set():
             self.hotkey.pressed.clear()
             self.toggle_overlay()
-        if int(now) != self._second and self.overlay_on:
+        if int(now) != self._second and self._overlay_shown:
             pin_on_top(self.top)  # games and other windows can push it down; re-assert each second
             hide_from_capture(self.top)  # needs the mapped hwnd, so not in set_overlay
         if int(now) != self._second and self.live:
@@ -845,7 +875,7 @@ class App:
         if changed or animating or self.dirty or int(now) != self._second:
             self._second, self.dirty = int(now), False
             self.redraw(now)
-        self.root.after(80, self.poll)
+        self.root.after(POLL_MS, self.poll)
 
 
 def run(*, overlay: bool, demo: bool, jsonl: TextIO | None, speed: float = 1.0,
@@ -858,7 +888,9 @@ def run(*, overlay: bool, demo: bool, jsonl: TextIO | None, speed: float = 1.0,
     events: queue.Queue[ConfirmedEvent | AliveCount] = queue.Queue()
     sink, stop, hotkey = GuiSink(events), threading.Event(), Hotkey()
     hotkey.start()
-    ledger = Ledger(teams=teams or (25 if demo else None), scale=speed if demo else 1.0)
+    # demo badges run to 40, which badge-based squad inference would read as duos
+    ledger = Ledger(squad_size=4 if demo else None, teams=teams or (25 if demo else None),
+                    scale=speed if demo else 1.0)
     live = None
     if live_dir is not None:
         from kfocr.ui.live import LiveCapture

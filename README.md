@@ -14,16 +14,17 @@ PUBG 킬피드에 표시된 픽셀을 로컬 OCR로 읽고, 관측한 이벤트�
 
 | 파일 | 용도 |
 | --- | --- |
-| `killfeed-lens-{version}-setup.exe` | 사용자 폴더(`%LOCALAPPDATA%\Programs\killfeed-lens`)에 설치합니다. 관리자 권한이 필요 없고, 시작 메뉴 바로가기(바탕화면은 선택)와 제거 프로그램을 만듭니다. 콘솔용 `kfocr.exe`도 함께 설치됩니다. |
-| `killfeed-lens-{version}-portable.exe` | 설치 없이 실행합니다. 시작할 때마다 압축을 풀기 때문에 설치판보다 늦게 뜹니다. |
+| `killfeed-lens-{version}-setup.exe` | 사용자 폴더(`%LOCALAPPDATA%\Programs\killfeed-lens`)에 설치합니다. 관리자 권한이 필요 없고, 시작 메뉴 바로가기(바탕화면은 선택)와 제거 프로그램을 만듭니다. 엔진과 콘솔용 `kfocr.exe`는 `resources\killfeed-lens\`에 함께 설치됩니다. |
 
-실행하면 팀 현황 창이 열리고 화면 캡처를 시작합니다(`kfocr gui --live`와 같습니다). 처음에는
-**킬피드**와 **전체 생존 인원**의 두 ROI를 차례로 지정하도록 안내합니다. 킬피드는 행 전체를,
-생존 인원은 **숫자만** 포함하세요(생존 문구·팀 수·킬 수는 제외). 항상 위에 뜨는 영역 창의 테두리를 끌어 크기를, 안쪽을
-끌어 위치를 맞추고 Enter로 확정합니다(Esc: 취소). 게임을 클릭해 포커스를 넘겨도 창은 위에 남고, 다시
-클릭하면 Enter/Esc를 쓸 수 있습니다. 확정한 영역은 흐린 테두리로 남으며 마우스·키보드 입력을 게임으로 그대로
-통과시키고 화면 캡처에도 찍히지 않습니다. 툴바의 **킬피드 ROI 조정**, **생존 인원 ROI 조정**으로 각각 다시 맞추고, **ROI 표시/숨김**으로
-테두리를 켜고 끕니다(PUBG는 '전체 창 모드(테두리 없음)'에서만 보임). 설정(`config.yaml`), ROI(`roi.yaml`), SQLite DB, 세션 artifacts, 로그(`logs\killfeed-lens.log`)는
+UI가 Electron 앱([app/](app/README.md))으로 바뀌면서 portable exe는 당분간 제공하지 않습니다. 이전 tkinter GUI는
+별도 exe 없이 `resources\killfeed-lens\kfocr.exe gui --live`로 실행할 수 있습니다(바로가기 없음).
+
+실행하면 팀 현황 창이 열리고, 엔진(`kfocr.exe engine`)이 화면 캡처를 시작합니다. 처음에는 주 모니터 전체를 덮는 ROI 편집기가
+안내와 함께 열립니다. **킬피드** 상자는 행 전체를, **생존 인원** 상자는 **숫자만** 포함하세요(생존 문구·팀 수·킬 수는
+제외). 테두리를 끌어 크기를, 안쪽을 끌어 위치를 맞추고 Enter로 확정합니다(Esc: 취소, Tab: 상자 전환, 방향키: 1px 이동).
+편집하는 동안에는 캡처를 멈춥니다. 팀 현황 창의 **ROI 조정**으로 다시 맞추고, `Ctrl+Alt+O`로 게임 위 오버레이를 켜고 끕니다.
+오버레이는 마우스 입력을 게임으로 통과시키고 화면 캡처에 찍히지 않으며, ROI를 가리지 않는 자리로 비켜납니다(PUBG는
+'전체 창 모드(테두리 없음)'에서만 보임). 설정(`config.yaml`), ROI(`roi.yaml`), SQLite DB, 세션 artifacts, 로그(`logs\killfeed-lens.log`)는
 `%LOCALAPPDATA%\killfeed-lens`에 저장되며, 제거해도 이 폴더는 남습니다. PUBG UI 패치 2026-10용 아이콘
 템플릿(`src/kfocr/assets/icons/2026-10`)이 포함되어 있어 별도 설정 없이 이벤트를 확정합니다. 다른 템플릿을 쓰려면
 이 폴더의 `config.yaml`에 `vision.icon_template_dir`를 지정합니다(설정 파일 기준 상대 경로 가능). 이 기본값은 GUI
@@ -157,6 +158,18 @@ uv run kfocr run --source screen --monitor 0 --roi-profile data/roi.yaml --conso
 패킷 수집, 입력 자동화는 구현하지 않습니다. 기본 12 FPS 캡처/최대 4 FPS 추론을 사용하며,
 screen 프레임 큐는 두 개로 제한합니다. 영상 replay는 프레임을 순서대로 처리합니다.
 Ctrl+C로 종료하면 세션은 `aborted`로 기록하고 이미 저장된 이벤트는 유지합니다.
+
+## 데스크톱 UI (Electron)
+
+설치 파일에 들어가는 UI는 [app/](app/README.md)의 Electron 앱입니다(tkinter GUI 대체).
+`kfocr engine`이 캡처와 팀 상태를 맡아 보드 스냅샷을 stdout에 JSON lines로 보내고
+([app/CONTRACT.md](app/CONTRACT.md)), 앱은 그 스냅샷으로 팀 현황 창·오버레이·ROI 편집기를 그립니다.
+
+```powershell
+cd app; npm install
+npm start          # uv run kfocr engine: 실시간 캡처, 첫 실행이면 ROI 편집기가 열림
+npm run demo       # uv run kfocr engine --demo: 가짜 경기
+```
 
 ## 검증·조회·내보내기
 

@@ -59,6 +59,13 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v6
 
+      - name: Setup Node (Electron app)
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
       - name: Ensure Inno Setup
         shell: pwsh
         run: |
@@ -66,7 +73,7 @@ jobs:
             choco install innosetup -y --no-progress
           }
 
-      # Builds the onedir app, portable exe and setup.exe, and smokes each packaged executable.
+      # Builds the engine onedir, the Electron app around it and setup.exe, and smokes the app.
       - name: Package and smoke
         shell: pwsh
         run: .\script\package.ps1

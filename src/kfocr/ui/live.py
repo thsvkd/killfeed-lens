@@ -10,10 +10,10 @@ from pathlib import Path
 from tkinter import messagebox
 
 from kfocr.capture.base import CaptureState
-from kfocr.capture.screen import ScreenSource
+from kfocr.capture.screen import ScreenSource, lower_thread_priority
 from kfocr.config import AppConfig, apply_roi_profile, load_config, save_roi_profile
 from kfocr.domain.models import NormalizedRect
-from kfocr.ui.gui import RoiBox
+from kfocr.ui.gui import ALIVE_DEFAULT, RoiBox
 from kfocr.ui.sidecar import EventSink
 
 LOG = logging.getLogger("kfocr.live")
@@ -97,7 +97,7 @@ class LiveCapture:
         self._setup_both = False
         self.box = RoiBox(root, self._confirmed, self._cancel_calibration, label="킬피드")
         self.alive_box = RoiBox(root, self._alive_confirmed, self._cancel_calibration,
-                                label="생존 인원 숫자", default_rect=NormalizedRect(0.92, 0.01, 0.04, 0.04))
+                                label="생존 인원 숫자", default_rect=ALIVE_DEFAULT)
 
     @property
     def status(self) -> str:
@@ -158,6 +158,7 @@ class LiveCapture:
     def _work(self, config: AppConfig, source: _LiveScreenSource) -> None:
         from kfocr.pipeline import Pipeline
 
+        lower_thread_priority()  # OCR runs on this thread (ORT intra_op 1); the game comes first
         LOG.info("live capture starting: db=%s monitor=%s icons=%s",
                  Path(config.storage.sqlite_path).resolve(), config.capture.monitor,
                  config.vision.icon_template_dir)

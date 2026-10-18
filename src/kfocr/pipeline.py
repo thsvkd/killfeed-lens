@@ -23,13 +23,28 @@ import numpy as np
 
 from kfocr import __version__
 from kfocr.config import AppConfig, inference_timing_ms
-from kfocr.domain.models import Frame, Session
+from kfocr.domain.models import Frame, NormalizedRect, Session
 from kfocr.logging import log_event
 from kfocr.ui.sidecar import ConsoleSink
 
 
 class PipelineBusyError(RuntimeError):
     pass
+
+
+ALIVE_INTERVAL_MS = 250  # the HUD count changes slowly; keep its OCR off the 30 Hz frame cadence
+
+
+def _crop(frame: Frame, rect: NormalizedRect) -> np.ndarray:
+    """crop_roi in screen coordinates: a region-captured frame holds only part of the screen."""
+    from kfocr.vision.roi import pixel_rect
+
+    left, top, right, bottom = pixel_rect(rect, frame.width, frame.height)
+    x, y = frame.origin or (0, 0)
+    height, width = frame.image_bgr.shape[:2]
+    if left < x or top < y or right - x > width or bottom - y > height:
+        raise ValueError("ROI lies outside the captured region")
+    return frame.image_bgr[top - y:bottom - y, left - x:right - x].copy()
 
 
 @contextmanager
@@ -81,12 +96,14 @@ def _git_commit() -> str | None:
 
 
 class Pipeline:
-    def __init__(self, config: AppConfig, source, *, recognizer=None, icons=None, sink=None,
-                 store=None, started_at_utc: datetime | None = None, manifest: dict | None = None):
+    def __init__(self, config: AppConfig, source, *, recognizer=None, icons=None, reader=None,
+                 sink=None, store=None, started_at_utc: datetime | None = None,
+                 manifest: dict | None = None):
         self.config = config
         self.source = source
         self.recognizer = recognizer
         self.icons = icons
+        self.reader = reader
         self.sink = sink
         self.store = store
         self.started_at_utc = started_at_utc
@@ -154,11 +171,10 @@ class Pipeline:
         from kfocr.domain.tracker import TemporalTracker
         from kfocr.storage.db import EventStore
         from kfocr.vision.alive import AliveCountReader
-        from kfocr.vision.badges import mask_badges, read_badges
         from kfocr.vision.change import EdgeChangeDetector
-        from kfocr.vision.icons import TemplateIconRecognizer, mask_icons
-        from kfocr.vision.preprocess import preprocess
-        from kfocr.vision.roi import crop_roi, pixel_rect
+        from kfocr.vision.glyphs import NameReader
+        from kfocr.vision.icons import TemplateIconRecognizer
+        from kfocr.vision.roi import pixel_rect
         from kfocr.vision.rows import RowAssembler
         from kfocr.vision.text import RapidOCRRecognizer
 
@@ -168,13 +184,20 @@ class Pipeline:
         own_store = self.store is None
         recognizer = self.recognizer or RapidOCRRecognizer()
         icons = self.icons or TemplateIconRecognizer(self.config.vision.icon_template_dir)
-        read_lines = getattr(recognizer, "read_lines", None)  # badges need recognition-only OCR
+        # No text detector per frame: rows come from the markers, names from glyph templates for the
+        # profile's resolution; recognition-only OCR reads badges and names the templates miss.
+        read_lines = getattr(recognizer, "read_lines", None)
+        resolution = self.config.roi.resolution
+        reader = self.reader or (NameReader.for_resolution(*resolution, read_lines) if resolution
+                                 else NameReader(read_lines))
         manifest = self.manifest or {
             "manifest_version": 1,
             "ocr": getattr(recognizer, "model_manifest", lambda: {
                 "engine": type(recognizer).__name__, "checksum": "unavailable"})(),
             "icons": getattr(icons, "model_manifest", lambda: {
                 "model": type(icons).__name__, "checksum": "unavailable"})(),
+            "glyphs": getattr(reader, "model_manifest", lambda: {
+                "engine": type(reader).__name__, "checksum": "unavailable"})(),
         }
         manifest_hash = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
         store = self.store or EventStore(self.config.storage.sqlite_path)
@@ -190,7 +213,7 @@ class Pipeline:
         last_heartbeat_ns: int | None = None
         heartbeat_errors = 0
         interval_ms, refresh_ms, _ = inference_timing_ms(self.config.capture, self.config.tracker)
-        previous_roi = None
+        previous_roi, ocr_failed = None, False
         pending: deque = deque(maxlen=32)
         start_wall = self.started_at_utc or datetime.now(UTC)
         start_perf = time.perf_counter()
@@ -218,10 +241,13 @@ class Pipeline:
         try:
             with _session_lock(self.config.storage.sqlite_path):
                 store.recover_running_sessions()
-                self.source.start()
                 from kfocr.capture.screen import ScreenSource
 
                 live = isinstance(self.source, ScreenSource)
+                if live:  # copy only the ROIs off the GPU, not the whole screen
+                    self.source.regions = tuple(rect for rect in (
+                        self.config.roi.rect, self.config.roi.alive_rect) if rect is not None)
+                self.source.start()
                 frames = self._frames(live)
                 for frame in frames:
                     end_ns = frame.captured_at_ns
@@ -262,7 +288,7 @@ class Pipeline:
                         else:
                             last_heartbeat_ns, heartbeat_errors = end_ns, 0
                             session.metadata["last_observed_at_utc"] = observed_wall.isoformat()
-                    if not np.any(frame.image_bgr):
+                    if frame.image_bgr.max() == 0:  # not np.any(): see ScreenSource
                         self.performance["black_frames"] += 1
                         log_event("capture.degraded", reason="black_frame")
                         previous_roi = None
@@ -271,13 +297,14 @@ class Pipeline:
                         continue
                     # HUD changes independently of the killfeed; its failures must not drop rows.
                     if self.config.roi.alive_rect is not None and (
-                            last_alive_ns is None or end_ns - last_alive_ns >= interval_ms * 1e6):
+                            last_alive_ns is None
+                            or end_ns - last_alive_ns >= max(interval_ms, ALIVE_INTERVAL_MS) * 1e6):
                         last_alive_ns = end_ns
                         started = time.perf_counter()
                         self.performance["alive_ocr_calls"] += 1
                         try:
                             reading = alive_reader.read(
-                                crop_roi(frame.image_bgr, self.config.roi.alive_rect),
+                                _crop(frame, self.config.roi.alive_rect),
                                 recognizer, frame.seq, end_ns)
                         except Exception:
                             reading = None
@@ -295,25 +322,23 @@ class Pipeline:
                                 except Exception:
                                     self.performance["sink_errors"] += 1
                                     log_event("sidecar.error")
-                    roi = crop_roi(frame.image_bgr, self.config.roi.rect)
+                    roi = _crop(frame, self.config.roi.rect)
                     elapsed = float("inf") if last_infer_ns is None else end_ns - last_infer_ns
                     interval, refresh_ns = interval_ms * 1e6, refresh_ms * 1e6
-                    changed = previous_roi is None or detector.should_infer(
-                        detector.score(previous_roi, roi))
+                    # A fresh row waits for its confirming frame: read the next one, changed or not
+                    # (unless that read failed: the tracker did not see it). Pending reads skip the
+                    # score, so the next one compares against plain ink and reads a little eagerly;
+                    # scoring every frame read ~2% fewer frames but lost a victim badge on the duo replay.
+                    changed = previous_roi is None or (tracker.pending and not ocr_failed) or (
+                        detector.should_infer(detector.score(previous_roi, roi)))
                     if elapsed >= interval and (changed or elapsed >= refresh_ns):
-                        last_infer_ns, previous_roi = end_ns, roi.copy()
+                        last_infer_ns, previous_roi = end_ns, roi  # the detector knows it by identity
                         started = time.perf_counter()
                         self.performance["inference_calls"] += 1
                         ocr_failed = False
                         try:
                             visual = icons.detect(roi)
-                            try:
-                                badges = read_badges(roi, read_lines) if read_lines else []
-                            except Exception:  # badges only refine teams; keep the row OCR
-                                log_event("badge.error", frame_seq=frame.seq)
-                                badges = []
-                            tokens = recognizer.recognize(
-                                preprocess(mask_icons(mask_badges(roi, badges), visual)))
+                            tokens, badges = reader.read(roi, visual)
                             rows = assembler.assemble(tokens, visual + badges, frame.seq, end_ns, roi)
                             candidates = [event for row in rows if (event := parser.parse(row))]
                         except Exception:
@@ -393,7 +418,8 @@ class Pipeline:
         path = Path(self.config.debug.artifact_dir) / str(session.session_id) / "crops"
         path.mkdir(parents=True, exist_ok=True)
         target = path / f"{event.event_id}.png"
-        if not cv2.imwrite(str(target), frame.image_bgr[top:bottom, left:right]):
+        x, y = frame.origin or (0, 0)
+        if not cv2.imwrite(str(target), frame.image_bgr[top - y:bottom - y, left - x:right - x]):
             raise RuntimeError("Unable to save opt-in event crop")
         event.source_crop_ref = str(target)
 

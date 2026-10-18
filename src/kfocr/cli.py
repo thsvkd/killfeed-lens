@@ -111,6 +111,12 @@ def _parser() -> argparse.ArgumentParser:
     gui.add_argument("--teams", type=int, help="Starting team count; unseen teams count as full squads")
     gui.add_argument("--verbose", action="store_true")
     gui.add_argument("--exit-after", type=float, help=argparse.SUPPRESS)
+    engine = commands.add_parser("engine", help="Board engine for the Electron UI (app/): "
+                                 "snapshots as JSON lines on stdout, commands on stdin")
+    engine.add_argument("--demo", action="store_true", help="Play a scripted fake match")
+    engine.add_argument("--speed", type=float, default=1.0, help="Demo playback speed multiplier")
+    engine.add_argument("--roi-profile", type=Path, help="Capture ROI profile (default: <data>/roi.yaml)")
+    engine.add_argument("--verbose", action="store_true")
     return parser
 
 
@@ -340,6 +346,7 @@ def _fetch_online_telemetry(args, config: AppConfig, session):
 def _validate(args, config: AppConfig, store) -> None:
     from kfocr.metrics.report import format_report
     from kfocr.telemetry.mapping import map_telemetry
+    from kfocr.telemetry.team_state import team_state_report
     from kfocr.telemetry.validator import validate_events
 
     session = store.get_session(args.session_id)
@@ -360,8 +367,13 @@ def _validate(args, config: AppConfig, store) -> None:
             if not args.player and not args.match_id:
                 raise ValueError("Supply --player for automatic match selection or --match-id explicitly")
             raw, match_id = _fetch_online_telemetry(args, config, session)
-        report = validate_events(session, store.list_events(args.session_id), map_telemetry(raw))
-        report.update({"ground_truth_source": source, "match_id": match_id})
+        canonical = map_telemetry(raw, viewer=args.player)
+        observed = store.list_events(args.session_id)
+        report = validate_events(session, observed, canonical)
+        report.update({"ground_truth_source": source, "match_id": match_id,
+                       "excluded_out_of_feed_range_knocks": len(map_telemetry(raw)) - len(canonical),
+                       "team_state": team_state_report(session, observed, raw, canonical,
+                                                       report["alignment"]["offset_seconds"])})
         store.save_report(args.session_id, report)
         print(format_report(report))
         log_event("validation.completed", session_id=args.session_id)
@@ -386,6 +398,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "gui":
             _gui(args)
+            return 0
+        if args.command == "engine":
+            from kfocr.ui.engine import run as run_engine
+
+            run_engine(demo=args.demo, speed=args.speed, roi_profile=args.roi_profile)
             return 0
         config = _config(args)
         if args.command in ("run", "replay"):

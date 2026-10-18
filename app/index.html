@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'">
+<title>killfeed-lens · 팀 현황</title>
+<link rel="stylesheet" href="node_modules/pretendard/dist/web/variable/pretendardvariable.css">
+<link rel="stylesheet" href="base.css">
+<link rel="stylesheet" href="board.css">
+</head>
+<body>
+<header class="toolbar">
+  <span id="capture" class="pill" role="status"></span>
+  <button id="track" class="switch" type="button" role="switch" aria-checked="true">
+    <span class="track" aria-hidden="true"><span class="knob"></span></span>
+    <span class="sw-label">킬피드 추적</span><span class="sw-val">켜짐</span>
+  </button>
+  <button id="overlay" class="switch" type="button" role="switch" aria-checked="true" aria-describedby="overlay-note">
+    <span class="track" aria-hidden="true"><span class="knob"></span></span>
+    <span class="sw-label">오버레이</span><span class="sw-val">켜짐</span>
+  </button>
+  <span id="overlay-note" class="note"></span>
+  <span class="spacer"></span>
+  <span class="note hint"><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>O</kbd> 게임 중에도 켜고 끔 · PUBG는 ‘전체 창 모드(테두리 없음)’에서만 오버레이가 보임</span>
+</header>
+
+<section class="hero" aria-label="경기 요약">
+  <div class="kpi">
+    <b id="players" class="num">-</b>
+    <span id="players-label" class="kpi-l">명 남음 · 추정</span>
+  </div>
+  <div class="kpi">
+    <b id="teams" class="num">-</b>
+    <span class="kpi-l">팀 남음 · 추정</span>
+  </div>
+  <div class="hero-side">
+    <p id="totals" class="totals"></p>
+    <p id="basis" class="basis"></p>
+  </div>
+  <div class="gauge" aria-hidden="true"><i id="gauge"></i></div>
+</section>
+
+<div class="legend" aria-label="기호 설명">
+  <span><svg class="g g-alive"><use href="#g-alive"/></svg>생존</span>
+  <span><svg class="g g-assumed"><use href="#g-assumed"/></svg>미확인(생존 가정)</span>
+  <span><svg class="g g-knocked"><use href="#g-knocked"/></svg>기절</span>
+  <span><svg class="g g-dead"><use href="#g-dead"/></svg>사망</span>
+  <span><svg class="g g-back"><use href="#g-back"/></svg>복귀(부활·리콜)</span>
+  <span><svg class="g g-unsure"><use href="#g-unsure"/></svg>생존 불명(전멸 가능 팀)</span>
+  <span class="legend-hot"><i></i>방금 바뀜</span>
+</div>
+
+<main class="body">
+  <section id="cards" class="cards" aria-label="팀별 현황">
+    <p class="waiting">킬피드 이벤트를 기다리는 중…</p>
+  </section>
+  <aside class="side">
+    <section class="feed" aria-labelledby="feed-h">
+      <h2 id="feed-h">최근 킬피드</h2>
+      <ol id="feed" class="feed-list"></ol>
+    </section>
+    <details id="roi" class="roi" open>
+      <summary><h2>화면 영역 · ROI</h2></summary>
+      <div id="screen" class="screen" aria-hidden="true">
+        <span id="roi-killfeed" class="box b-roi"><em>킬피드</em></span>
+        <span id="roi-alive" class="box b-roi"><em>인원</em></span>
+        <span id="ov-box" class="box b-ov"><em>오버레이</em></span>
+      </div>
+      <div class="roi-actions">
+        <button id="roi-edit" type="button" class="btn">ROI 조정</button>
+        <button id="ov-edit" type="button" class="btn primary">오버레이 위치 조정</button>
+      </div>
+      <p id="roi-note" class="note">킬피드는 표시되는 행 전체를, 생존 인원은 숫자만 포함하도록 맞춥니다. 오버레이는 ROI를 가리지 않도록 스스로 비켜납니다.</p>
+    </details>
+  </aside>
+</main>
+<script src="common.js"></script>
+<script src="board.js"></script>
+</body>
+</html>

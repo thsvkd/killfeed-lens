@@ -1,21 +1,21 @@
-"""Frozen entry point for KillfeedLens.exe (windowed), the portable exe and kfocr.exe (console).
+"""Frozen entry point for kfocr.exe (console): the regular `kfocr` CLI.
 
-Without arguments the GUI executables start `kfocr gui --live`; with arguments every executable is
-the regular `kfocr` CLI.
+The installed app ships it in the Electron UI's resources\\killfeed-lens and runs `kfocr.exe
+engine`; `kfocr.exe gui --live` still starts the old Tk GUI.
 """
 
 import sys
-from pathlib import Path
 
 from kfocr.cli import main
 from kfocr.ui.live import data_dir, log_path
 
-if sys.stderr is None:  # windowed build: no console, keep prints and tracebacks in the app log
+if sys.stdout is None or sys.stderr is None:
+    # Started without a console (e.g. by a GUI process): keep prints and tracebacks in the app log.
+    # A stream that exists stays as it is: `kfocr.exe engine` writes its snapshots to the stdout pipe.
     path = log_path(data_dir())
     path.parent.mkdir(parents=True, exist_ok=True)
-    sys.stdout = sys.stderr = open(path, "a", encoding="utf-8", buffering=1)
+    log = open(path, "a", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stdout or log
+    sys.stderr = sys.stderr or log
 
-argv = sys.argv[1:]
-if not argv and Path(sys.executable).stem.lower() != "kfocr":
-    argv = ["gui", "--live"]
-sys.exit(main(argv))
+sys.exit(main(sys.argv[1:]))

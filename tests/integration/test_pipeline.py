@@ -28,16 +28,18 @@ class Frames:
 
 
 class Text:
+    """Stands in for the per-frame name reader (and, with read_lines, the HUD recognizer)."""
+
     def __init__(self, fail_first=False, fail_calls=()):
         self.calls = 0
         self.fail_calls = {1} if fail_first else set(fail_calls)
 
-    def recognize(self, image):
+    def read(self, image, icons):
         self.calls += 1
         if self.calls in self.fail_calls:
             raise RuntimeError("test inference failure")
         return [OCRToken("AAAA", 0.99, (20, 10, 70, 30)),
-                OCRToken("BBBB", 0.99, (130, 10, 190, 30))]
+                OCRToken("BBBB", 0.99, (130, 10, 190, 30))], []
 
 
 class Icons:
@@ -67,7 +69,7 @@ def test_persistent_video_rows_store_once_and_complete_session(tmp_path):
     from kfocr.storage.db import EventStore
 
     config, source, text, sink = setup(tmp_path), Frames(), Text(), Sink()
-    session = Pipeline(config, source, recognizer=text, icons=Icons(), sink=sink,
+    session = Pipeline(config, source, recognizer=text, reader=text, icons=Icons(), sink=sink,
                        started_at_utc=datetime(2026, 10, 1, tzinfo=UTC)).run()
     store = EventStore(config.storage.sqlite_path)
     events = store.list_events(session.session_id)
@@ -83,11 +85,47 @@ def test_persistent_video_rows_store_once_and_complete_session(tmp_path):
     store.close()
 
 
+def test_live_capture_grabs_only_the_roi_and_keeps_screen_coordinates(tmp_path):
+    import cv2
+
+    from kfocr.capture.screen import ScreenSource
+    from kfocr.pipeline import Pipeline
+
+    screen = np.full((200, 640, 3), 90, dtype=np.uint8)
+    screen[0:100, 320:640] = next(Frames(1).frames()).image_bgr  # killfeed in the top-right
+
+    class Backend:
+        resolution, boxes = (640, 200), []
+
+        def grab(self, region=None):
+            self.boxes.append(region)
+            left, top, right, bottom = region
+            return screen[top:bottom, left:right].copy()
+
+        def stop(self):
+            pass
+
+    backend = Backend()
+    config = setup(tmp_path)
+    config.roi.rect = NormalizedRect(0.5, 0, 0.5, 0.5)
+    config.debug.save_event_crops = True
+    sink = Sink()
+    source = ScreenSource(sample_fps=50, backend_factory=lambda monitor: backend)
+    session = Pipeline(config, source, recognizer=(r := Text()), reader=r, icons=Icons(), sink=sink).run(max_frames=30)
+
+    assert set(backend.boxes) == {(320, 0, 640, 100)}  # never the whole screen
+    assert session.source_resolution == (640, 200)
+    (event,) = sink.events
+    assert event.source_bbox == (340, 10, 510, 30)  # ROI-relative tokens moved onto the screen
+    crop = cv2.imread(event.source_crop_ref)
+    assert crop.shape == (20, 170, 3) and np.array_equal(crop, screen[10:30, 340:510])
+
+
 def test_ocr_error_drops_inference_and_recovers(tmp_path):
     from kfocr.pipeline import Pipeline
 
     sink = Sink()
-    session = Pipeline(setup(tmp_path), Frames(), recognizer=Text(True),
+    session = Pipeline(setup(tmp_path), Frames(), recognizer=(r := Text(True)), reader=r,
                        icons=Icons(), sink=sink).run()
     assert len(sink.events) == 1
     assert session.metadata["performance"]["ocr_errors"] == 1
@@ -106,7 +144,7 @@ def test_db_failure_is_bounded_and_session_aborts(tmp_path):
     store = FailingStore(config.storage.sqlite_path)
     source = Frames(100)
     with pytest.raises(RuntimeError, match="persist"):
-        Pipeline(config, source, recognizer=Text(), icons=Icons(), sink=Sink(),
+        Pipeline(config, source, recognizer=(r := Text()), reader=r, icons=Icons(), sink=Sink(),
                  store=store).run()
     assert source.stopped
     assert store.list_sessions()[0].status == "aborted"
@@ -127,7 +165,7 @@ def test_multisink_console_uses_session_relative_time(tmp_path):
                 yield replace(frame, captured_at_ns=frame.captured_at_ns + 900_000_000_000)
 
     output = io.StringIO()
-    Pipeline(setup(tmp_path), MonotonicFrames(), recognizer=Text(), icons=Icons(),
+    Pipeline(setup(tmp_path), MonotonicFrames(), recognizer=(r := Text()), reader=r, icons=Icons(),
              sink=MultiSink(ConsoleSink(stream=output), Sink())).run()
     assert output.getvalue().startswith("00:00.000")
 
@@ -142,7 +180,7 @@ def test_black_video_never_emits_rows_even_if_ocr_would_hallucinate(tmp_path):
                 yield Frame("black", seq, seq * 100_000_000, image, 320, 100)
 
     text, sink = Text(), Sink()
-    session = Pipeline(setup(tmp_path), BlackFrames(), recognizer=text, icons=Icons(), sink=sink).run()
+    session = Pipeline(setup(tmp_path), BlackFrames(), recognizer=text, reader=text, icons=Icons(), sink=sink).run()
     assert sink.events == []
     assert text.calls == 0
     assert session.metadata["performance"]["black_frames"] == 40
@@ -162,7 +200,7 @@ def test_failed_historical_replay_ends_on_video_timeline(tmp_path):
     config = setup(tmp_path)
     old_start = datetime(2020, 1, 1, tzinfo=UTC)
     with pytest.raises(RuntimeError, match="corrupt video"):
-        Pipeline(config, InterruptedFrames(), recognizer=Text(), icons=Icons(), sink=Sink(),
+        Pipeline(config, InterruptedFrames(), recognizer=(r := Text()), reader=r, icons=Icons(), sink=Sink(),
                  started_at_utc=old_start).run()
     store = EventStore(config.storage.sqlite_path)
     session = store.list_sessions()[0]
@@ -176,7 +214,7 @@ def test_ocr_failures_do_not_reemit_persistent_row(tmp_path):
 
     sink = Sink()
     # Two failures (800ms, 1200ms) leave a gap longer than max_gap since the last success.
-    session = Pipeline(setup(tmp_path), Frames(), recognizer=Text(fail_calls=(3, 4)),
+    session = Pipeline(setup(tmp_path), Frames(), recognizer=(r := Text(fail_calls=(3, 4))), reader=r,
                        icons=Icons(), sink=sink).run()
     assert session.metadata["performance"]["ocr_errors"] == 2
     assert len(sink.events) == 1
@@ -207,7 +245,7 @@ def test_hud_count_reaches_gui_and_jsonl_even_with_static_or_failing_killfeed(tm
     output = tmp_path / "events.jsonl"
     jsonl = JsonlSink(output)
     try:
-        session = Pipeline(config, Frames(), recognizer=HUDText(), icons=Icons(),
+        session = Pipeline(config, Frames(), recognizer=(r := HUDText()), reader=r, icons=Icons(),
                            sink=MultiSink(GuiSink(events), jsonl)).run()
     finally:
         jsonl.close()
@@ -241,8 +279,18 @@ def test_hud_ocr_failures_do_not_suppress_killfeed_events(tmp_path):
 
     config, sink = setup(tmp_path), Sink()
     config.roi.alive_rect = NormalizedRect(0.8, 0, 0.2, 0.2)
-    session = Pipeline(config, Frames(), recognizer=BrokenHUD(), icons=Icons(), sink=sink).run()
+    session = Pipeline(config, Frames(), recognizer=(r := BrokenHUD()), reader=r, icons=Icons(), sink=sink).run()
     assert len(sink.events) == 1
     assert session.metadata["performance"]["alive_ocr_errors"] > 0
     assert session.metadata["performance"]["ocr_errors"] == 0
     assert "first_observed_alive" not in session.metadata
+
+
+def test_failing_reads_of_a_pending_row_fall_back_to_the_refresh_pace(tmp_path):
+    from kfocr.pipeline import Pipeline
+
+    # The first read sees a new row (pending), every later read fails: an unchanged feed is
+    # then read only at the refresh pace, not on every frame the cap allows.
+    text = Text(fail_calls=range(2, 100))
+    session = Pipeline(setup(tmp_path), Frames(), recognizer=text, reader=text, icons=Icons(), sink=Sink()).run()
+    assert session.metadata["performance"]["ocr_errors"] == text.calls - 1 <= 10

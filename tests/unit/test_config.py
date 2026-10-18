@@ -18,7 +18,7 @@ def test_config_loads_roi_and_hash_is_independent_of_yaml_order(tmp_path):
 
 
 @pytest.mark.parametrize("text", [
-    "capture: {sample_fps: 0}", "capture: {inference_fps_cap: 50}",
+    "capture: {sample_fps: 0}", "capture: {inference_fps_cap: 61}",
     "confidence: {candidate_min: 0.9, confirmed_min: 0.8}",
     "telemetry: {api_key: secret}", "tracker: {evidence_frames: 1}",
     "capture: {sample_fps: .nan}", "capture: {sample_fps: '12'}",
@@ -33,6 +33,20 @@ def test_config_rejects_invalid_limits_and_plaintext_secrets(tmp_path, text):
     path.write_text(text)
     with pytest.raises(ValueError):
         load_config(path)
+
+
+def test_default_cadence_keeps_two_frame_confirmation_and_cap_follows_capture_rate(tmp_path):
+    from kfocr.config import AppConfig, inference_timing_ms, load_config
+
+    config = AppConfig()
+    config.validate()
+    interval, refresh, longest = inference_timing_ms(config.capture, config.tracker)
+    assert round(interval, 1) == 33.3 and refresh == 400  # unchanged rows still re-read at 2.5 Hz
+    assert longest <= config.tracker.max_gap_ms <= config.tracker.evidence_window_ms
+    path = tmp_path / "slow.yaml"
+    path.write_text("capture: {sample_fps: 10}\n")  # older configs: cap no longer above capture
+    slow = load_config(path)
+    assert inference_timing_ms(slow.capture, slow.tracker)[0] == 100
 
 
 def test_config_relative_paths_resolve_next_to_config_file(tmp_path, monkeypatch):
