@@ -367,10 +367,14 @@ class Pipeline:
                         gone = end_ns - since
                         if alive_reader.shown_ns == end_ns and not away:
                             if hud_ns is None and gone >= MATCH_ENDED_NS:
-                                # this run's first match after a lobby (the capture restarted
-                                # there): the board may still hold the last one.
+                                # this run's first match after a lobby (app opened, or the
+                                # capture restarted there): the board may still hold the last
+                                # one, and the match gets a session of its own, so it starts
+                                # when the match does (the lobby part closes empty; a session
+                                # opened 10 min early failed to auto-match its telemetry).
                                 # ponytail: a restart mid-match that then sees no HUD for 45 s
-                                # (alt-tabbed) clears that match's board too.
+                                # (alt-tabbed) splits that match too.
+                                ended_ns = end_ns
                                 publish_match("new")
                             if hud_ns is not None and gone >= MATCH_ENDED_NS:
                                 away = True
@@ -526,8 +530,6 @@ class Pipeline:
             raise RuntimeError("Unable to save opt-in debug frame")
 
     def _prune_artifacts(self, current: UUID) -> None:
-        if not (self.config.debug.save_full_frames or self.config.debug.save_event_crops):
-            return
         root = Path(self.config.debug.artifact_dir)
         if not root.exists():
             return

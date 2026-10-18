@@ -59,7 +59,8 @@ changes every second would make the engine emit every second.
      "weapon": "M416", "hs": true}            // may be null
   ],
   "rois": {"killfeed": [0.68, 0.0, 0.31, 0.2],// normalized x, y, w, h; null = not set yet
-           "alive": [0.92, 0.01, 0.04, 0.04]} // (live + killfeed null = first run: ROI guide)
+           "alive": [0.92, 0.01, 0.04, 0.04]},// (live + killfeed null = first run: ROI guide)
+  "settings": {"save_event_crops": false}     // debug.save_event_crops of <data>/config.yaml; never null
 }
 ```
 
@@ -83,8 +84,12 @@ team, event or HUD reading, like `gui.overlay_has_content`).
  "alive": [x, y, w, h] | null,               //   null = no alive-count ROI
  "screen": [2560, 1440]}                     //   the monitor in physical pixels (profile resolution)
 {"cmd": "cancel"}                            // editor cancelled: resume with the old ROIs
+{"cmd": "settings", "save_event_crops": true}// merge debug.save_event_crops into <data>/config.yaml
 ```
 
 After `roi` or `cancel` capture resumes if tracking is on. An invalid or unsavable `roi` keeps the
 old ROIs and shows `ROI를 저장하지 않았습니다: …` as an error status. The demo keeps ROIs in memory
-only. Unknown commands and non-JSON lines are ignored.
+only. `settings` keeps every other key of an existing `config.yaml` (comments are lost), creates
+the file if missing and restarts capture like `roi`; a non-boolean value or an unreadable
+`config.yaml` is ignored with `설정을 저장하지 않았습니다: …` as an error status. The demo keeps
+settings in memory only. Unknown commands and non-JSON lines are ignored.

@@ -1,8 +1,9 @@
 'use strict';
 // killfeed-lens UI, main process. Spawns the board engine (`kfocr engine`, see CONTRACT.md), fans
 // its snapshots out to the board window and the overlay, and owns the overlay's placement,
-// visibility, click-through and capture exclusion, plus the ROI editor window.
-const { app, BrowserWindow, globalShortcut, ipcMain, nativeTheme, screen } = require('electron');
+// visibility, click-through and capture exclusion, plus the ROI editor, the settings window and the
+// tray (closing the board hides it there; the app ends only through quit()).
+const { app, BrowserWindow, Menu, Tray, globalShortcut, ipcMain, nativeTheme, screen, shell } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -38,6 +39,7 @@ let engine = null;
 let last = null; // latest snapshot
 let frozen = false; // --shots: ignore new snapshots while capturing
 let guided = false; // the first-run ROI guide opens once per launch
+let quitting = false; // quit() runs: the board's X no longer hides it
 const ov = { wanted: true, editing: false, hotkey: false, pos: null, w: OVERLAY_W, h: 200 };
 
 const webPreferences = {
@@ -69,10 +71,12 @@ function startEngine() {
   child.on('error', (err) => {
     engine = null;
     sendBoard('engine', { alive: false, reason: `엔진을 시작하지 못했습니다: ${err.message}` });
+    refresh();
   });
   child.on('exit', (code) => {
     if (engine === child) engine = null;
     sendBoard('engine', { alive: false, reason: `엔진 종료됨 (코드 ${code})` });
+    refresh();
   });
   readline.createInterface({ input: child.stdout }).on('line', onLine);
   sendBoard('engine', { alive: true });
@@ -84,7 +88,8 @@ function stopEngine() {
     const child = engine;
     // stdin EOF is the polite stop; a stuck engine gets its whole tree killed
     const timer = setTimeout(() => {
-      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }).on('exit', resolve);
+      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+        .on('exit', resolve).on('error', resolve);
     }, ENGINE_STOP_MS);
     child.once('exit', () => { clearTimeout(timer); resolve(); });
     child.stdin.end();
@@ -96,7 +101,7 @@ function sendEngine(cmd) {
 }
 
 function onLine(line) {
-  if (frozen) return;
+  if (frozen || quitting) return; // a late first-run guide must not open while quitting
   let snap;
   try { snap = JSON.parse(line); } catch { return; } // not a snapshot (engine log noise)
   if (!snap || snap.v !== 1) return;
@@ -106,6 +111,7 @@ function onLine(line) {
   if (overlay?.isVisible()) overlay.webContents.send('snapshot', snap);
   if (roisChanged && overlay) place(); // re-calibrated: move the overlay off the new ROIs
   syncOverlay();
+  refresh();
   if (!guided && snap.mode === 'live' && !snap.error && !snap.rois.killfeed && !SHOTS) {
     guided = true; // first run: no killfeed ROI yet, like LiveCapture.begin
     openEditor(true);
@@ -186,6 +192,12 @@ function sendState() {
     rect: b ? [b.x / width, b.y / height, b.width / width, b.height / height] : null,
     screen: [width, height],
   });
+}
+
+function setOverlayWanted(on) {
+  ov.wanted = on;
+  syncOverlay();
+  refresh();
 }
 
 function setEditing(on) {
@@ -283,7 +295,23 @@ function createBoard() {
   board.setMenu(null);
   logConsole(board, 'board');
   board.loadFile('index.html');
-  board.once('ready-to-show', () => { if (!SHOTS) board.show(); });
+  board.once('ready-to-show', () => { if (!SHOTS && !ui.startHidden) board.show(); });
+  board.on('close', (e) => {
+    if (quitting) return;
+    e.preventDefault();
+    if (!ui.closeToTray) return void setImmediate(quit); // destroy the board outside its own close event
+    if (ov.editing) setEditing(false); // its 위치 확정 button hides with the board
+    board.hide(); // capture, engine and overlay keep running
+    if (ui.trayHintShown || SHOTS) return;
+    ui.trayHintShown = true;
+    saveUi();
+    tray?.displayBalloon({ iconType: 'info', title: 'killfeed-lens',
+      content: "killfeed-lens가 트레이에서 계속 실행 중입니다. 종료하려면 트레이 아이콘 메뉴에서 '종료'를 누르세요." });
+  });
+  // OS shutdown/logoff and the installer's Restart Manager ('close-app') take the same clean stop;
+  // not blocking them (preventDefault would show Windows' "app is preventing shutdown" screen)
+  board.on('query-session-end', () => { quit(); });
+  board.on('session-end', () => { quit(); });
   board.on('closed', () => {
     board = null;
     editor?.destroy();
@@ -292,13 +320,129 @@ function createBoard() {
   });
 }
 
+function showBoard() {
+  if (!board) return;
+  if (board.isMinimized()) board.restore();
+  board.show();
+  board.focus();
+}
+
+// --- UI settings (<userData>/settings.json), settings window, tray --------------------------------
+const ui = { closeToTray: true, openAtLogin: false, startHidden: false, trayHintShown: false };
+const UI_KEYS = ['ui.closeToTray', 'ui.openAtLogin', 'ui.startHidden'];
+const uiFile = () => path.join(app.getPath('userData'), 'settings.json');
+let settingsWin = null;
+let tray = null;
+let trayKey = ''; // what the tray menu was last built from
+let settingsKey = ''; // what the settings window was last sent
+
+function loadUi() {
+  if (SHOTS) return; // the smoke runs on the defaults and leaves the user's file alone
+  try {
+    const saved = JSON.parse(fs.readFileSync(uiFile(), 'utf8'));
+    for (const k of Object.keys(ui)) if (typeof saved[k] === 'boolean') ui[k] = saved[k];
+  } catch {} // first run or unreadable: defaults
+  if (app.isPackaged) ui.openAtLogin = app.getLoginItemSettings().openAtLogin; // the OS has the last word
+}
+
+function saveUi() {
+  if (SHOTS) return;
+  try { fs.writeFileSync(uiFile(), JSON.stringify(ui, null, 2)); } catch (err) { console.error(`settings.json: ${err.message}`); }
+}
+
+function setUi(name, value) {
+  if (name === 'openAtLogin') {
+    if (!app.isPackaged) return; // dev: it would register the bare electron.exe
+    app.setLoginItemSettings({ openAtLogin: value });
+  }
+  ui[name] = value;
+  saveUi();
+}
+
+/** Same rule as kfocr.ui.live.data_dir: installed %LOCALAPPDATA%\killfeed-lens, from source data/. */
+function dataDir() {
+  if (!app.isPackaged) return path.join(REPO, 'data');
+  return path.join(process.env.LOCALAPPDATA || path.join(app.getPath('home'), 'AppData', 'Local'), 'killfeed-lens');
+}
+
+function settingsState() {
+  return {
+    ui: { closeToTray: ui.closeToTray, openAtLogin: ui.openAtLogin, startHidden: ui.startHidden },
+    overlay: { wanted: ov.wanted, hotkey: ov.hotkey },
+    engine: (engine && last?.settings) || null, // unknown until a running engine reports them
+    version: app.getVersion(), hotkey: 'Ctrl+Alt+O', packaged: app.isPackaged,
+  };
+}
+
+/** Bring the tray menu and the settings window up to date, each only when its part changed. */
+function refresh() {
+  const status = engine ? (last?.status ?? '엔진 시작 중') : '엔진 연결 안 됨';
+  const ready = Boolean(engine && last);
+  const tracking = ready && Boolean(last.tracking);
+  const key = JSON.stringify([status, tracking, ready, ov.wanted]);
+  if (tray && key !== trayKey) {
+    trayKey = key;
+    tray.setToolTip(`killfeed-lens · ${status}`);
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: '팀 현황 열기', click: showBoard },
+      { label: '오버레이 표시', type: 'checkbox', checked: ov.wanted, click: () => setOverlayWanted(!ov.wanted) },
+      { label: '킬피드 추적', type: 'checkbox', checked: tracking, enabled: ready,
+        // rebuilt from the truth: the next snapshot shows whether the engine followed
+        click: () => { sendEngine({ cmd: 'tracking', on: !tracking }); trayKey = ''; refresh(); } },
+      { label: '설정…', click: openSettings },
+      { type: 'separator' },
+      { label: '종료', click: quit },
+    ]));
+  }
+  const state = settingsState();
+  const skey = JSON.stringify(state);
+  if (settingsWin && !settingsWin.isDestroyed() && skey !== settingsKey) {
+    settingsKey = skey;
+    settingsWin.webContents.send('settings:state', state);
+  }
+}
+
+function openSettings() {
+  if (settingsWin) { settingsWin.show(); return settingsWin.focus(); }
+  const win = new BrowserWindow({
+    title: 'killfeed-lens · 설정',
+    width: 560, height: 660, minWidth: 480, minHeight: 480, maximizable: false, fullscreenable: false,
+    backgroundColor: '#0A0D12', show: false, autoHideMenuBar: true,
+    webPreferences,
+  });
+  settingsWin = win;
+  win.setMenu(null);
+  logConsole(win, 'settings');
+  win.loadFile('settings.html');
+  win.once('ready-to-show', () => { if (!SHOTS) win.show(); });
+  win.on('closed', () => { settingsWin = null; settingsKey = ''; });
+}
+
+function createTray() {
+  tray = new Tray(path.join(__dirname, 'icon.ico'));
+  tray.on('click', showBoard);
+  refresh();
+}
+
+/** The only way out (tray 종료, X with closeToTray off, --shots): every window, then the engine's
+ *  clean stop (stdin EOF, so capture closes its session), then the app. */
+async function quit() {
+  if (quitting) return;
+  quitting = true;
+  tray?.destroy();
+  tray = null;
+  for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.destroy();
+  await stopEngine();
+  app.quit();
+}
+
 // --- IPC -------------------------------------------------------------------------------------
 ipcMain.on('ui:ready', (e) => {
   if (last) e.sender.send('snapshot', last);
   sendState();
   sendBoard('engine', { alive: Boolean(engine), reason: engine ? '' : '엔진 연결 안 됨' });
 });
-ipcMain.on('overlay:toggle', () => { ov.wanted = !ov.wanted; syncOverlay(); });
+ipcMain.on('overlay:toggle', () => setOverlayWanted(!ov.wanted));
 ipcMain.on('overlay:edit', (_e, on) => setEditing(Boolean(on)));
 ipcMain.on('overlay:size', (_e, { w, h }) => {
   if (!overlay) return; // a late message after the board closed
@@ -317,16 +461,40 @@ ipcMain.on('roi:done', (_e, { killfeed, alive }) => {
                                                        Math.round(bounds.height * scaleFactor)] });
 });
 ipcMain.on('roi:cancel', () => closeEditor({ cmd: 'cancel' }));
+ipcMain.on('settings:open', () => openSettings());
+ipcMain.on('settings:ready', () => { settingsKey = ''; refresh(); });
+ipcMain.on('settings:set', (_e, msg) => {
+  const { key, value } = msg ?? {};
+  settingsKey = ''; // the next state confirms or reverts the window's optimistic switch
+  if (typeof value !== 'boolean') return refresh();
+  // the engine answers with a snapshot (new settings, or an error status) that sends the state
+  if (key === 'engine.save_event_crops') return sendEngine({ cmd: 'settings', save_event_crops: value });
+  if (key === 'overlay') setOverlayWanted(value);
+  else if (UI_KEYS.includes(key)) setUi(key.slice(3), value);
+  refresh();
+});
+ipcMain.on('app:open', (_e, which) => {
+  if (which !== 'data' && which !== 'logs') return;
+  const dir = which === 'logs' ? path.join(dataDir(), 'logs') : dataDir();
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    return console.error(`app:open ${dir}: ${err.message}`);
+  }
+  shell.openPath(dir).then((err) => { if (err) console.error(`app:open ${dir}: ${err}`); });
+});
 
 // --- app -------------------------------------------------------------------------------------
 if (!app.requestSingleInstanceLock()) app.exit(0); // a second engine would fight over the camera
-app.on('second-instance', () => { board?.show(); board?.focus(); });
+app.on('second-instance', () => showBoard());
 
 app.whenReady().then(() => {
   nativeTheme.themeSource = 'dark'; // dark native title bar
+  loadUi();
   createBoard();
   createOverlay();
-  ov.hotkey = globalShortcut.register(HOTKEY, () => { ov.wanted = !ov.wanted; syncOverlay(); });
+  createTray();
+  ov.hotkey = globalShortcut.register(HOTKEY, () => setOverlayWanted(!ov.wanted));
   // Games and other topmost windows can push the overlay down; re-assert while it is shown.
   setInterval(() => { if (overlay?.isVisible()) overlay.moveTop(); }, 2000);
   startEngine();
@@ -334,9 +502,13 @@ app.whenReady().then(() => {
 });
 
 app.on('will-quit', () => globalShortcut.unregisterAll());
-app.on('window-all-closed', async () => { await stopEngine(); app.quit(); });
+// any other app.quit() goes through quit() too, so the engine always stops first
+app.on('before-quit', (e) => { if (!quitting) { e.preventDefault(); quit(); } });
+// Listening keeps Electron from quitting by itself once quit() has destroyed the windows: the app
+// ends after the engine has stopped (a hidden board never closes, so nothing else gets here).
+app.on('window-all-closed', () => {});
 
-// --- --shots <dir>: board, overlay and ROI editor as PNGs, then quit (npm run smoke) ------------
+// --- --shots <dir>: every window as a PNG, the board's X, then quit (npm run smoke) --------------
 async function shoot(dir) {
   fs.mkdirSync(dir, { recursive: true });
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -353,5 +525,15 @@ async function shoot(dir) {
   await wait(600);
   await save(editor, 'roi.png');
   closeEditor({ cmd: 'cancel' });
-  board.close();
+  openSettings();
+  await wait(1500);
+  settingsWin.showInactive();
+  await wait(600);
+  await save(settingsWin, 'settings.png');
+  board.close(); // the X button: with closeToTray (the default) everything but the board stays up
+  await wait(500);
+  if (board && !board.isDestroyed() && !board.isVisible() && overlay && engine && tray) {
+    fs.writeFileSync(path.join(dir, 'closed-to-tray.ok'), 'ok');
+  }
+  await quit();
 }

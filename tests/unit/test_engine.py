@@ -6,6 +6,8 @@ import queue
 import threading
 import time
 
+import pytest
+
 from kfocr.domain.models import AliveCount, ConfirmedEvent, EventType, NormalizedRect
 from kfocr.ui import engine as eng
 from kfocr.ui.teams import Ledger, make_event
@@ -37,6 +39,7 @@ class FakeFeed:
         self.calls: list[str] = []
         self.rois: tuple = (KILLFEED, None)
         self.saved: list[tuple] = []
+        self.settings = {"save_event_crops": False}
 
     def load(self) -> None:
         self.calls.append("load")
@@ -50,6 +53,9 @@ class FakeFeed:
     def save_rois(self, rect, alive, resolution) -> None:
         self.saved.append((rect, alive, resolution))
         self.rois = (rect, alive)
+
+    def save_settings(self, save_event_crops) -> None:
+        self.settings = {"save_event_crops": save_event_crops}
 
 
 def start_engine(feed):
@@ -182,6 +188,24 @@ def test_a_bad_roi_is_reported_and_capture_resumes_with_the_old_one():
     thread.join(5)
 
 
+def test_settings_command_saves_restarts_capture_and_rejects_bad_values():
+    feed = FakeFeed()
+    _, out, stdin, thread = start_engine(feed)
+    wait_for(lambda: snaps(out))
+    assert snaps(out)[0]["settings"] == {"save_event_crops": False}
+
+    stdin.send({"cmd": "settings", "save_event_crops": True})
+    wait_for(lambda: snaps(out)[-1]["settings"]["save_event_crops"])
+    assert feed.calls[-2:] == ["stop", "start"] and not snaps(out)[-1]["error"]
+
+    stdin.send({"cmd": "settings", "save_event_crops": "yes"})
+    wait_for(lambda: snaps(out)[-1]["error"])
+    assert "설정을 저장하지 않았습니다" in snaps(out)[-1]["status"]
+    assert snaps(out)[-1]["settings"] == {"save_event_crops": True}  # kept
+    stdin.close()
+    thread.join(5)
+
+
 def test_events_and_hud_readings_go_out_once_per_change():
     feed = FakeFeed()
     inbox, out, stdin, thread = start_engine(feed)
@@ -254,6 +278,37 @@ def test_live_feed_waits_for_an_roi_and_saves_it_where_live_config_reads_it(tmp_
     feed.save_rois(KILLFEED, None, (2560, 1080))  # not 16:9: the default box may miss the HUD
     feed.load()
     assert feed.rois == (KILLFEED, None)
+
+
+def test_live_feed_merges_settings_into_config_yaml_and_keeps_other_keys(tmp_path):
+    feed = eng.LiveFeed(tmp_path, None, queue.Queue())
+    assert feed.settings == {"save_event_crops": False}  # before load
+    feed.save_settings(True)  # no config.yaml yet: created
+    feed.load()
+    assert feed.error is None and feed.settings == {"save_event_crops": True}
+
+    (tmp_path / "config.yaml").write_text(
+        "capture:\n  monitor: 1\ndebug:\n  save_full_frames: true\n", encoding="utf-8")
+    feed.save_settings(True)
+    feed.load()
+    assert feed.config.capture.monitor == 1 and feed.config.debug.save_full_frames
+    assert feed.settings == {"save_event_crops": True}
+    feed.save_settings(False)
+    feed.load()
+    assert feed.settings == {"save_event_crops": False} and feed.config.capture.monitor == 1
+
+    bad = "capture: [unclosed\n"
+    (tmp_path / "config.yaml").write_text(bad, encoding="utf-8")
+    with pytest.raises(ValueError):
+        feed.save_settings(True)
+    assert (tmp_path / "config.yaml").read_text(encoding="utf-8") == bad  # never overwritten
+
+
+def test_demo_feed_keeps_settings_in_memory():
+    feed = eng.DemoFeed(queue.Queue())
+    assert feed.settings == {"save_event_crops": False}
+    feed.save_settings(True)
+    assert feed.settings == {"save_event_crops": True}
 
 
 def test_cli_wires_the_engine_and_rejects_a_bad_speed():

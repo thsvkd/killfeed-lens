@@ -385,9 +385,11 @@ def test_a_capture_started_in_the_lobby_clears_the_board_when_the_match_starts(t
     text = HUDText({41: "", 42: "90"})
     Pipeline(config, Match([(0, 10, 0), (50, 20, 1)]), recognizer=text, reader=text, icons=Icons(),
              sink=sink).run()
-    assert sink.states == ["new"]  # the board may hold the last match; the session stays one
+    assert sink.states == ["new"]  # the board may hold the last match
     store = EventStore(config.storage.sqlite_path)
-    assert len(store.list_sessions()) == 1
+    lobby, match = sorted(store.list_sessions(), key=lambda s: s.started_at_utc)
+    assert lobby.ended_at_utc <= match.started_at_utc  # the match's session starts with it
+    assert (match.started_at_utc - lobby.started_at_utc).total_seconds() >= 50
     store.close()
 
 

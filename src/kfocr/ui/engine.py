@@ -20,6 +20,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol, TextIO
 
+import yaml
+
 from kfocr.capture.screen import lower_thread_priority
 from kfocr.config import AppConfig, save_roi_profile
 from kfocr.domain.models import AliveCount, ConfirmedEvent, NormalizedRect
@@ -62,7 +64,7 @@ def _team(t: Team) -> dict:
 
 def snapshot(led: Ledger, *, tracking: bool, status: str, error: bool,
              rois: tuple[NormalizedRect | None, NormalizedRect | None], mode: str = "live",
-             monitor: int = 0) -> dict:
+             monitor: int = 0, settings: dict | None = None) -> dict:
     """Board snapshot v1. Times are time.monotonic() in ms; 0 = never."""
     events = []
     for e in reversed(list(led.recent)[-KEEP_EVENTS:]):
@@ -80,7 +82,8 @@ def snapshot(led: Ledger, *, tracking: bool, status: str, error: bool,
             "basis": _HUD_AGE.sub("", led.basis), "kills": led.total_kills,
             "knocked": led.knocked_now, "last_at": _ms(led.last_at) if led.recent else 0,
             "teams": [_team(t) for t in led.ranked()], "events": events,
-            "rois": {"killfeed": _rect(rois[0]), "alive": _rect(rois[1])}}
+            "rois": {"killfeed": _rect(rois[0]), "alive": _rect(rois[1])},
+            "settings": settings or {"save_event_crops": False}}
 
 
 # --- feeds: where events come from ---------------------------------------------------------
@@ -94,11 +97,14 @@ class Feed(Protocol):
     def rois(self) -> tuple[NormalizedRect | None, NormalizedRect | None]: ...
     @property
     def monitor(self) -> int: ...
+    @property
+    def settings(self) -> dict: ...
     def load(self) -> None: ...
     def start(self) -> None: ...
     def stop(self) -> None: ...
     def save_rois(self, rect: NormalizedRect, alive: NormalizedRect | None,
                   resolution: tuple[int, int]) -> None: ...
+    def save_settings(self, save_event_crops: bool) -> None: ...
 
 
 class _QueueSink:
@@ -140,6 +146,10 @@ class LiveFeed:
     @property
     def monitor(self) -> int:
         return self.config.capture.monitor if self.config else 0
+
+    @property
+    def settings(self) -> dict:
+        return {"save_event_crops": bool(self.config and self.config.debug.save_event_crops)}
 
     @property
     def status(self) -> str:
@@ -224,6 +234,22 @@ class LiveFeed:
         self.roi_profile = output
         LOG.info("roi profile saved: %s", output.resolve())
 
+    def save_settings(self, save_event_crops: bool) -> None:
+        """Merge into <base>/config.yaml, keeping its other keys (comments are not kept)."""
+        path = self.base / "config.yaml"
+        raw: Any = {}
+        if path.exists():
+            try:
+                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            except yaml.YAMLError as exc:  # never overwrite a file the user hand-edited into a typo
+                raise ValueError("config.yaml is not valid YAML") from exc
+        debug = raw.setdefault("debug", {}) if isinstance(raw, dict) else None
+        if not isinstance(debug, dict):
+            raise ValueError("config.yaml has an unexpected shape")
+        debug["save_event_crops"] = save_event_crops
+        path.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        LOG.info("settings saved: %s", path.resolve())
+
 
 class DemoFeed:
     """gui.simulate_match on a thread, a new seed per match. Stopping pauses the match."""
@@ -237,6 +263,7 @@ class DemoFeed:
     def __init__(self, inbox: queue.Queue, speed: float = 1.0, teams: int = 25):
         self.inbox, self.speed, self.teams = inbox, speed, teams
         self.rois: tuple[NormalizedRect | None, NormalizedRect | None] = (ROI_DEFAULT, ALIVE_DEFAULT)
+        self.settings = {"save_event_crops": False}
         self._seed = 7
         self._script: Any = None
         self._pending: tuple[float, ConfirmedEvent] | None = None
@@ -281,6 +308,9 @@ class DemoFeed:
                   resolution: tuple[int, int]) -> None:
         self.rois = (rect, alive)  # the demo never writes the real profile
 
+    def save_settings(self, save_event_crops: bool) -> None:
+        self.settings = {"save_event_crops": save_event_crops}  # in memory only, like the ROIs
+
 
 # --- engine ---------------------------------------------------------------------------------
 class Engine:
@@ -310,7 +340,8 @@ class Engine:
 
     def command(self, cmd: dict) -> None:
         """tracking on/off; calibrate (pause capture while the UI edits ROIs); roi (save the
-        edited rects, resume); cancel (resume with the old ROIs). Others are ignored."""
+        edited rects, resume); cancel (resume with the old ROIs); settings (save, restart capture).
+        Others are ignored."""
         kind = cmd.get("cmd")
         if kind == "tracking":
             self.tracking, self.warning = bool(cmd.get("on")), None
@@ -331,6 +362,17 @@ class Engine:
             except (KeyError, TypeError, ValueError, OSError) as exc:
                 LOG.warning("roi not saved: %s", exc)
                 self.warning = f"ROI를 저장하지 않았습니다: {exc}"
+        elif kind == "settings":
+            try:
+                value = cmd["save_event_crops"]
+                if not isinstance(value, bool):
+                    raise ValueError("save_event_crops must be true or false")
+                self.feed.save_settings(value)
+                self.warning = None
+            except (KeyError, TypeError, ValueError, OSError) as exc:
+                LOG.warning("settings not saved: %s", exc)
+                self.warning = f"설정을 저장하지 않았습니다: {exc}"
+            self._last = None  # answer even an unchanged board: the settings window waits for it
         else:
             LOG.info("unknown engine command ignored: %r", kind)
             return
@@ -361,7 +403,8 @@ class Engine:
     def emit(self) -> None:
         status, error = self.status
         snap = snapshot(self.led, tracking=self.tracking, status=status, error=error,
-                        rois=self.feed.rois, mode=self.feed.mode, monitor=self.feed.monitor)
+                        rois=self.feed.rois, mode=self.feed.mode, monitor=self.feed.monitor,
+                        settings=self.feed.settings)
         body = {k: v for k, v in snap.items() if k != "now"}
         if body == self._last:
             return

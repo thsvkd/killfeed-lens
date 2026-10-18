@@ -13,18 +13,19 @@ cd app
 npm install          :: electron 44.5.1, pretendard 1.3.9 (exact pin, package-lock.json)
 npm start            :: uv run kfocr engine (레포 루트 기준 data/로 실시간 캡처)
 npm run demo         :: uv run kfocr engine --demo (가짜 경기, ROI는 메모리에만)
-npm run smoke        :: 데모 엔진으로 --shots 실행, 세 창의 PNG와 렌더러 오류 없음 확인
+npm run smoke        :: 데모 엔진으로 --shots 실행, 네 창의 PNG·트레이로 닫기·렌더러 오류 없음 확인
 ```
 
 `npm install` 뒤 `node_modules\electron\dist\electron.exe`가 없으면 `node node_modules\electron\install.js`를
-실행합니다. 종료는 팀 현황 창을 닫으면 됩니다. 엔진은 stdin이 닫히면 캡처 세션을 정리하고 끝나며(캡처
-정리는 최대 15초), 20초 안에 끝나지 않으면 프로세스 트리째 종료됩니다.
+실행합니다. 팀 현황 창의 X는 창을 트레이로 숨길 뿐이고(설정에서 '앱 종료'로 바꿀 수 있음), 종료는 트레이
+아이콘 메뉴의 '종료'입니다. 엔진은 stdin이 닫히면 캡처 세션을 정리하고 끝나며(캡처 정리는 최대 15초),
+20초 안에 끝나지 않으면 프로세스 트리째 종료됩니다.
 
 | 설정 | 뜻 |
 |---|---|
 | `KFL_ENGINE` | 엔진 명령 전체(셸 명령). 예: `set KFL_ENGINE=uv run kfocr engine --roi-profile data\roi.yaml` |
 | `--gpu` | 하드웨어 가속을 켭니다(비교 측정용). 기본은 소프트웨어 합성입니다 |
-| `--shots <dir>` | 보드·오버레이·ROI 편집기 스크린샷을 저장하고 종료합니다(`npm run smoke`가 사용) |
+| `--shots <dir>` | 보드·오버레이·ROI 편집기·설정 창 스크린샷을 저장하고, 보드의 X가 앱을 트레이에 남기는지 확인해 `closed-to-tray.ok`를 쓴 뒤 종료합니다(`npm run smoke`가 사용). 저장된 UI 설정은 읽지도 쓰지도 않고 기본값으로 돕니다 |
 
 ## 패키징
 
@@ -33,7 +34,7 @@ npm run smoke        :: 데모 엔진으로 --shots 실행, 세 창의 PNG와 �
 20.3.0으로 `dist\KillfeedLens-win32-x64`를 만듭니다. 결과물 구성은 다음과 같습니다.
 
 - `KillfeedLens.exe`
-- `resources\app.asar`: 페이지와 Pretendard woff2·OFL 라이선스만 들어 있습니다.
+- `resources\app.asar`: 페이지, 트레이 아이콘(`icon.ico`), Pretendard woff2·OFL 라이선스만 들어 있습니다.
 - `resources\killfeed-lens\`: 엔진 onedir
 
 이어서 `@electron/fuses` 2.1.3이 RunAsNode·NODE_OPTIONS·NodeCliInspect를 끄고 OnlyLoadAppFromAsar·asar integrity를 켭니다.
@@ -42,6 +43,19 @@ npm run smoke        :: 데모 엔진으로 --shots 실행, 세 창의 PNG와 �
 
 ## 사용
 
+- **트레이**: 팀 현황 창의 X를 누르면 창만 숨고 캡처·엔진·오버레이는 계속 돕니다(처음 한 번은 Windows
+  알림으로 알려 줍니다). 트레이 아이콘을 클릭하면 창이 다시 열리고, 아이콘 메뉴에는 '팀 현황 열기',
+  '오버레이 표시', '킬피드 추적', '설정…', '종료'가 있습니다. 아이콘에 마우스를 올리면 엔진 상태가 보입니다.
+  '종료'는 창을 모두 닫고 엔진을 위와 같은 순서로 멈춘 뒤 앱을 끝냅니다. 앱을 다시 실행하면 이미 떠 있는
+  앱의 팀 현황 창이 열립니다.
+- **설정**: 툴바 오른쪽 끝의 '설정' 버튼이나 트레이 메뉴의 '설정…'으로 엽니다. 바꾸는 즉시 적용됩니다.
+  - 일반: X 버튼 동작(트레이로 숨기기 / 앱 종료), Windows 시작 시 자동 실행(설치판에서만), 트레이로
+    조용히 시작(팀 현황 창을 띄우지 않음). `%APPDATA%` 아래 앱 폴더(`app.getPath('userData')`)의
+    `settings.json`에 저장됩니다.
+  - 오버레이: 팀 현황 창의 오버레이 스위치와 같고, `Ctrl+Alt+O` 단축키가 등록됐는지 보여 줍니다.
+  - 검증용 기록: 킬피드 이벤트 이미지 저장. 엔진이 `config.yaml`의 `debug.save_event_crops`에 저장하고
+    캡처를 다시 시작합니다(엔진 연결 전에는 바꿀 수 없음).
+  - 정보: 앱 버전, 데이터 폴더(`data\`, 설치판은 `%LOCALAPPDATA%\killfeed-lens`)와 그 아래 `logs` 폴더 열기.
 - `Ctrl+Alt+O`: 게임 중에도 오버레이를 켜고 끕니다. 오버레이는 보여줄 내용이 생겨야 나타납니다.
   PUBG는 '전체 창 모드(테두리 없음)'에서만 오버레이가 보입니다.
 - **ROI 조정**: 주 모니터 전체를 덮는 편집기가 열립니다. 킬피드 상자는 표시되는 행 전체를, 생존 인원
@@ -71,11 +85,13 @@ npm run smoke        :: 데모 엔진으로 --shots 실행, 세 창의 PNG와 �
 
 | 파일 | 역할 |
 |---|---|
-| `main.js` | 창 생성, 엔진 실행·종료, 오버레이 배치·표시, ROI 편집기, 단축키 |
+| `main.js` | 창 생성, 엔진 실행·종료, 오버레이 배치·표시, ROI 편집기, 단축키, 트레이, UI 설정 저장 |
 | `preload.js` | 렌더러에 열어 주는 IPC 채널 허용 목록 |
 | `common.js`, `base.css` | 상태 기호(모양이 의미를 담고 색은 반복), 시계, 변경 강조, 색 토큰 |
 | `index.html`, `board.js`, `board.css` | 팀 현황 창 |
 | `overlay.html`, `overlay.js`, `overlay.css` | 오버레이 |
 | `roi.html`, `roi.js`, `roi.css` | ROI 편집기 |
+| `settings.html`, `settings.js`, `settings.css` | 설정 창 |
+| `icon.ico` | 트레이 아이콘(`packaging\killfeed-lens.ico` 복사본) |
 | `package.mjs` | 패키징과 fuses(`script\package.ps1`이 호출) |
 | `smoke.mjs`, `measure.ps1` | 스모크 확인, 자원 측정 |

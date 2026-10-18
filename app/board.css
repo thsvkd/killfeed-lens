@@ -299,3 +299,4 @@ kbd {
 .btn:disabled { color: var(--faint); cursor: not-allowed; border-style: dashed; }
 .btn.primary[aria-pressed="true"] { background: var(--hot); border-color: var(--hot); color: #14130A; font-weight: 700; }
 .roi .note { margin: 8px 16px 0; line-height: 1.5; }
+.toolbar .btn { height: 30px; padding: 0 14px; }

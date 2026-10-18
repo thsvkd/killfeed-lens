@@ -195,6 +195,7 @@
   $('overlay').addEventListener('click', () => kfl.send('overlay:toggle'));
   $('ov-edit').addEventListener('click', () => kfl.send('overlay:edit', !ov?.editing));
   $('roi-edit').addEventListener('click', () => kfl.send('roi:open'));
+  $('settings').addEventListener('click', () => kfl.send('settings:open'));
 
   function render() {
     renderHead();

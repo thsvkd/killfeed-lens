@@ -17,7 +17,7 @@ const engine = join(root, 'dist', 'killfeed-lens');
 const FONT = ['/node_modules/pretendard/package.json', '/node_modules/pretendard/dist/LICENSE.txt',
               '/node_modules/pretendard/dist/web/variable/pretendardvariable.css',
               '/node_modules/pretendard/dist/web/variable/woff2/PretendardVariable.woff2'];
-const DEV = /^\/(package-lock\.json|\.gitignore|README\.md|CONTRACT\.md|smoke\.mjs|package\.mjs|measure\.ps1)$/;
+const DEV = /^\/(package-lock\.json|\.gitignore|README\.md|CONTRACT\.md|smoke\.mjs|package\.mjs|measure\.ps1|\.omc(\/.*)?)$/;
 
 function ignore(path) {
   if (DEV.test(path)) return true;

@@ -1,5 +1,6 @@
-// Smoke check: start the app on the demo engine with --shots, then require a PNG from every window
-// and no warning or error from any renderer.
+// Smoke check: start the app on the demo engine with --shots, then require a PNG from every window,
+// the board's X leaving the app in the tray (closed-to-tray.ok) and no warning or error from any
+// renderer.
 // Usage: npm run smoke (the dev app, needs uv), or node smoke.mjs <packaged KillfeedLens.exe>
 // (scripts/smoke_packaged.py). The app must not be running already: its single-instance lock
 // would end this run at once.
@@ -13,10 +14,11 @@ const [exe, args] = packaged ? [packaged, []] : [(await import('electron')).defa
 const dir = mkdtempSync(join(tmpdir(), 'kfl-smoke-'));
 const run = spawnSync(exe, [...args, '--demo', '--shots', dir],
                       { cwd: import.meta.dirname, encoding: 'utf8', timeout: 300_000 });
-const logged = `${run.stdout ?? ''}${run.stderr ?? ''}`.split(/\r?\n/).filter((l) => /^\[(board|overlay|roi)\]/.test(l));
-const missing = ['board.png', 'overlay.png', 'roi.png'].filter((f) => {
+const logged = `${run.stdout ?? ''}${run.stderr ?? ''}`.split(/\r?\n/)
+  .filter((l) => /^\[(board|overlay|roi|settings)\]/.test(l));
+const missing = ['board.png', 'overlay.png', 'roi.png', 'settings.png', 'closed-to-tray.ok'].filter((f) => {
   const p = join(dir, f);
-  return !existsSync(p) || statSync(p).size < 2000;
+  return !existsSync(p) || statSync(p).size < (f.endsWith('.png') ? 2000 : 2);
 });
 const failed = run.status !== 0 || missing.length || logged.length;
 console.log(failed ? 'smoke FAILED' : 'smoke ok', { exit: run.status, missing, logged, shots: dir });
