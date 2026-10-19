@@ -55,12 +55,19 @@ def _rect(r: NormalizedRect | None) -> list[float] | None:
     return [r.x, r.y, r.w, r.h] if r else None
 
 
-def _team(t: Team, unsure: bool) -> dict:
+def _team(t: Team, drawn: tuple[dict[str, str], int]) -> dict:
+    states, assumed = drawn  # Ledger.draw(): what the HUD count leaves room for
+    standing = assumed + sum(st in ("alive", "knocked") for st in states.values())
+    # no room left for anyone on it either: it may be wiped
+    maybe_out = t.maybe_out or (t.id is not None and not t.eliminated and not standing)
     return {"id": t.id, "kills": t.kills, "knocks": t.knocks, "out": t.eliminated,
-            "maybe_out": t.maybe_out, "left": t.remaining, "slots": t.total, "at": _ms(t.touched),
-            "unseen": "unsure" if unsure or t.maybe_out else "assumed",
+            "maybe_out": maybe_out,
+            # the standing marks drawn; up to everyone not seen dead if it may be wiped ("0~N")
+            "left": t.remaining if maybe_out else standing, "slots": t.total, "at": _ms(t.touched),
+            "unseen": "assumed" if assumed >= t.total - len(t.players) else "unsure",
+            "assumed": assumed,
             "atk": _ms(t.attacked), "hit": _ms(t.hit),
-            "players": [{"name": p.name, "st": p.status.value, "at": _ms(p.touched),
+            "players": [{"name": p.name, "st": states[p.name], "at": _ms(p.touched),
                          "back": _ms(p.revived)} for p in t.players.values()]}
 
 
@@ -74,7 +81,7 @@ def snapshot(led: Ledger, *, tracking: bool, status: str, error: bool,
                        "killer": e.killer_name, "kt": led.team_of(e.killer_name, e.killer_team),
                        "victim": e.victim_name, "vt": led.team_of(e.victim_name, e.victim_team),
                        "weapon": e.weapon_label, "hs": e.headshot})
-    hud, unsure = led.alive_count, led.unseen_unsure
+    hud, drawn = led.alive_count, led.draw()
     return {"v": 1, "now": _ms(time.monotonic()), "mode": mode, "monitor": monitor,
             "tracking": tracking, "status": status, "error": error, "match_over": match_over,
             "players_left": led.players_left, "teams_left": led.teams_left,
@@ -84,7 +91,7 @@ def snapshot(led: Ledger, *, tracking: bool, status: str, error: bool,
             "basis": _HUD_AGE.sub("", led.basis), "kills": led.total_kills,
             "knocked": led.knocked_now, "last_at": _ms(led.last_at) if led.recent else 0,
             "placed": led.placed,
-            "teams": [_team(t, unsure) for t in led.ranked()], "events": events,
+            "teams": [_team(t, drawn[t.id]) for t in led.ranked()], "events": events,
             "rois": {"killfeed": _rect(rois[0]), "alive": _rect(rois[1])},
             "settings": settings or {"save_event_crops": False}}
 

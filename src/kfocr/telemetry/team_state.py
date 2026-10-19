@@ -59,12 +59,15 @@ def team_state_report(session: Session, observed: list[ConfirmedEvent], raw: lis
                          for names in members.values())
         # The app reads the HUD alive count too (live match 3: 1293 of 1295 confirmed readings
         # were the true count), so both boards get the true count of the moment. The teams_left
-        # range is thus scored as with a perfect HUD reading; the no-HUD path is not scored.
-        hud = AliveCount(sum(status.get(n, Status.ALIVE) is not Status.DEAD
-                             for names in members.values() for n in names), 0, 0)
+        # range is thus scored as with a perfect HUD reading; the no-HUD path is not scored. The
+        # count is shown held for a few seconds, as the live HUD shows it (recall waves).
+        alive = sum(status.get(n, Status.ALIVE) is not Status.DEAD
+                    for names in members.values() for n in names)
         for ledger, _, _ in feeds:
-            ledger.observe_alive_count(hud)
+            for held in (3_000_000_000, 0):
+                ledger.observe_alive_count(AliveCount(alive, 0, board_ns - held))
         mismatched = []
+        drawn_board, drawn_oracle = board.draw(), oracle.draw()
         for team in sorted(seen):
             names = members[team]
             truth_dead = sum(status.get(n) is Status.DEAD for n in names)
@@ -72,6 +75,13 @@ def team_state_report(session: Session, observed: list[ConfirmedEvent], raw: lis
             mine = _team_view([board.teams[k] for k, target in mapped.items() if target == team])
             best = _team_view([oracle.teams[team]] if team in oracle.teams else [])
             checks.update(teams=1)
+            # What the overlay draws standing (alive, knocked, assumed slots) vs players not dead.
+            truth_alive = len(names) - truth_dead
+            drawn = sum(_drawn_alive(drawn_board[k]) for k, target in mapped.items() if target == team)
+            ideal = _drawn_alive(drawn_oracle[team]) if team in drawn_oracle else 0
+            checks.update(truth_alive=drawn == truth_alive, ceiling_alive=ideal == truth_alive,
+                          oracle_alive=drawn == ideal)
+            checks["truth_alive_error"] += abs(drawn - truth_alive)
             for label, got, want in (("truth", mine, truth), ("oracle", mine, best),
                                      ("ceiling", best, truth)):
                 checks.update({f"{label}_{field}": got[i] == want[i]
@@ -94,7 +104,7 @@ def team_state_report(session: Session, observed: list[ConfirmedEvent], raw: lis
 
     def rates(label: str) -> dict[str, float]:
         return {field: checks[f"{label}_{field}"] / checks["teams"] if checks["teams"] else 0.0
-                for field in ("dead", "kills", "eliminated")}
+                for field in ("dead", "kills", "eliminated", "alive")}
 
     def share(key: str) -> float:
         return checks[key] / checks["checkpoints"] if checks["checkpoints"] else 0.0
@@ -107,6 +117,8 @@ def team_state_report(session: Session, observed: list[ConfirmedEvent], raw: lis
             "vs_oracle": rates("oracle"),
             # Oracle vs truth: what no reading can show (unseen recalls, underfilled squads).
             "oracle_vs_truth": rates("ceiling"),
+            "alive_mean_error": (checks["truth_alive_error"] / checks["teams"]
+                                 if checks["teams"] else 0.0),
             "teams_left_in_range": (checks["teams_left"] / checks["teams_left_shown"]
                                     if checks["teams_left_shown"] else 0.0),
             "teams_left_unknown": checks["checkpoints"] - checks["teams_left_shown"],
@@ -119,6 +131,11 @@ def team_state_report(session: Session, observed: list[ConfirmedEvent], raw: lis
                                         if key is not None and key not in mapped),
         "checkpoints": rows,
     }
+
+
+def _drawn_alive(drawn: tuple[dict[str, str], int]) -> int:
+    states, assumed = drawn
+    return assumed + sum(st in ("alive", "knocked") for st in states.values())
 
 
 def _team_view(teams: list) -> tuple[int, int, bool]:

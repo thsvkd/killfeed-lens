@@ -47,7 +47,7 @@
       el = document.createElement('article');
       el.className = 'card hot-able';
       el.innerHTML = `<header class="card-h"><span class="badge num"></span><span class="out-tag">탈락</span>
-          <span class="maybe-tag" title="본 팀원은 모두 쓰러졌고, 아직 안 보인 팀원이 없으면 이미 전멸했습니다 (마지막 사망 뒤에 기절한 팀원이 있으면 누군가 서 있으므로 해당 없음)">전멸 가능</span>
+          <span class="maybe-tag" title="본 팀원은 모두 쓰러졌고, 아직 안 보인 팀원이 없으면 이미 전멸했습니다 (마지막 사망 뒤에 기절한 팀원이 있으면 누군가 서 있으므로 해당 없음). 화면의 생존자 수로는 이 팀에 서 있는 사람이 없을 때도 표시합니다">전멸 가능</span>
           <span class="kills" title="처치">${KF.glyph('kill')}<b class="num"></b></span></header>
         <ul class="slots"></ul>
         <footer class="card-f"><span class="sum"></span><span class="knocks"></span></footer>`;
@@ -85,7 +85,7 @@
       const label = `${s.name ?? '미확인 슬롯'} ${KF.STATUS[s.kind]}`;
       const st = s.kind === 'knocked' ? '<span class="st">기절</span>' : '';
       // lit red when the player was just knocked or killed, yellow for anything else (comeback)
-      return `<li class="slot hot-able s-${s.kind}${s.st === 'alive' ? '' : ' loss'}" aria-label="${KF.esc(label)}">${KF.glyph(s.kind)}
+      return `<li class="slot hot-able s-${s.kind}${s.kind === 'knocked' || s.kind === 'dead' ? ' loss' : ''}" aria-label="${KF.esc(label)}">${KF.glyph(s.kind)}
         <span class="nm" title="${KF.esc(s.name ?? why)}">${name}</span>${st}
         <span class="st back" hidden>복귀</span></li>`;
     }).join('') + (all.length > MAX_SLOTS ? `<li class="slot more-slots">+ ${all.length - MAX_SLOTS}명</li>` : '');

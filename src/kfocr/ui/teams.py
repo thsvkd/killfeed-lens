@@ -4,6 +4,7 @@ import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from enum import StrEnum
 from uuid import UUID, uuid4
 
@@ -26,6 +27,18 @@ _BADGE_APART_NS = 1_000_000_000
 # matches), so up to this many never-seen badges may be no team at all.
 # ponytail: measured on two matches; retune with more telemetry.
 LOBBY_LEAVERS = 2
+# Recalls bring dead players back in waves (telemetry of 6 matches: +1..+7 on the HUD count, 2-4
+# times a match). A larger rise is a misread, not a recall.
+RECALL_MAX = 8
+# A rise counts between counts the HUD held this long: one misread second (30 -> 24 -> 30) is no
+# recall wave, and a recall and a death close together net out.
+# ponytail: a misread held longer still counts as a recall; undo a held rise a held fall soon
+# reverses if live matches show one.
+_COUNT_HELD_NS = 3 * 1_000_000_000
+# A dead player shown dying again this much later came back (recall) and died again; sooner is the
+# same death read twice.
+_DIED_AGAIN_NS = 30 * 1_000_000_000
+_FULL_SQUAD_MATCH = 0.6  # same results from 0.5 to 0.8 on live matches 3 and 4
 _LETHAL = {EventType.KILL, EventType.FINISH, EventType.BLEEDOUT, EventType.SUICIDE,
            EventType.ENVIRONMENT}
 _CREDIT = {EventType.KILL, EventType.FINISH}
@@ -45,6 +58,8 @@ class Player:
     revived: float = 0.0  # time.monotonic() of the last comeback (revive/recall/AED/expiry)
     knocked_ns: int = 0
     died_ns: int = 0  # feed time of the last death
+    seen_ns: int = 0  # feed time it was last shown standing (acting, or knocked)
+    sure: bool = True  # False: a knock ran out with no news (most likely revived, maybe dead)
     kills: int = 0  # credited to this player, so they follow it out of the unknown-badge bucket
     knocks: int = 0
 
@@ -135,8 +150,20 @@ class Ledger:
         self._team_of: dict[str, int] = {}
         self.alive_count: AliveCount | None = None
         self.alive_count_at = 0.0
+        # Players the HUD count says came back (recall) that the board still has dead: until the
+        # feed shows them, they hold their share of the count (draw()).
+        self.returned = 0
+        self._held: int | None = None  # the last count shown for _COUNT_HELD_NS
+        self._shown_since = 0
 
     def observe_alive_count(self, reading: AliveCount) -> None:
+        if self.alive_count is None or reading.count != self.alive_count.count:
+            self._shown_since = reading.observed_at_ns
+        elif reading.observed_at_ns - self._shown_since >= _COUNT_HELD_NS and reading.count != self._held:
+            if self._held is not None and 0 < reading.count - self._held <= RECALL_MAX:
+                dead = sum(t.dead for t in self.teams.values())
+                self.returned = min(dead, self.returned + reading.count - self._held)
+            self._held = reading.count
         self.alive_count = reading
         self.alive_count_at = time.monotonic()
 
@@ -187,6 +214,20 @@ class Ledger:
         same = next((known for known in pool if key and name_key(known) == key), None)
         if same is None:
             same = next((known for known in members if same_teammate(known, name)), None)
+        if same is None and members and key:
+            # PUBG names have 4-16 characters, so a shorter read is part of one; and a squad holds
+            # squad_size players, so a further name close to one of them is it read wrong (live
+            # match 4: 5 of 30 squads grew a fifth member, a 2-4 character part or a name one
+            # letter off). A further name unlike all of them is someone else under a misread
+            # badge: merging those too cost 2.7 points of dead and eliminated on that match.
+            def close(known: str) -> float:
+                return SequenceMatcher(None, name_key(known), key).ratio()
+            if len(name) < 4:
+                same = max((known for known in members if key in name_key(known)), key=close, default=None)
+            if same is None and len(members) >= self.squad_size:
+                best = max(members, key=close)
+                if close(best) >= _FULL_SQUAD_MATCH:
+                    same = best
         return same or name
 
     def _attach(self, name: str | None, team: int | None) -> int | None:
@@ -213,11 +254,15 @@ class Ledger:
         player.touched = player.revived = team.touched = now
 
     def expire(self, now_ns: int, now: float) -> None:
-        """Knocked players with no death in KNOCK_TIMEOUT_NS are assumed revived."""
+        """Knocked players with no death in KNOCK_TIMEOUT_NS were most likely revived (the feed never
+        shows revives; telemetry: revives take 13-99 s, median 28 s), but a death the reader missed
+        looks the same: unconfirmed until the feed shows them again, they are the first drawn
+        unsure when the HUD count has no room for everyone (draw())."""
         for team in self.teams.values():
             for player in team.players.values():
                 if player.status is Status.KNOCKED and now_ns - player.knocked_ns >= KNOCK_TIMEOUT_NS:
                     self._revive(team, player, now)
+                    player.sure = False
 
     def tick(self, now: float) -> None:
         """Advance the feed clock between events so quiet periods still expire knocks."""
@@ -247,8 +292,11 @@ class Ledger:
                 player = None
                 if killer_name:
                     player = killer.players.setdefault(killer_name, Player(killer_name))
+                    if player.status is Status.DEAD:  # back (recall): one of the HUD's comebacks
+                        self.returned = max(0, self.returned - 1)
                     if player.status is not Status.ALIVE:  # acting players are alive, however we got here
                         self._revive(killer, player, now)
+                    player.seen_ns, player.sure = ns, True
                 friendly = killer_key is not None and killer_key == victim_key
                 if not friendly:
                     killer.attacked = now
@@ -268,19 +316,24 @@ class Ledger:
             player = victim.players.setdefault(name, Player(name))
             if kind is EventType.KNOCK:
                 if player.status is Status.DEAD:  # knocked again => it came back (recall/AED/revive)
+                    self.returned = max(0, self.returned - 1)
                     self._revive(victim, player, now)
                 if player.status is not Status.DEAD:  # a repeat knock restarts the bleed-out clock
                     player.status, player.touched, player.knocked_ns = Status.KNOCKED, now, ns
+                    player.seen_ns, player.sure = ns, True
             elif kind in _LETHAL and player.status is not Status.DEAD:
                 player.status, player.touched, player.died_ns = Status.DEAD, now, ns
-            self._bleed_out(victim, now)
+            elif kind in _LETHAL and ns - player.died_ns >= _DIED_AGAIN_NS:  # came back, died again
+                self.returned = max(0, self.returned - 1)
+                player.died_ns = ns
+            self._bleed_out(victim, now, ns)
 
     @staticmethod
-    def _bleed_out(team: Team, now: float) -> None:
+    def _bleed_out(team: Team, now: float, ns: int) -> None:
         if team.eliminated:  # whole squad down: knocked members bleed out with it
             for member in team.players.values():
                 if member.status is Status.KNOCKED:
-                    member.status, member.touched = Status.DEAD, now
+                    member.status, member.touched, member.died_ns = Status.DEAD, now, ns
 
     def amend(self, event: ConfirmedEvent) -> None:
         """An applied event's badges read late: its unknown-team players go home with their
@@ -290,7 +343,7 @@ class Ledger:
             if team is not None:
                 self._attach(self._resolve(name, team), team)
                 if (home := self.teams.get(team)) is not None:  # no empty card for a misread
-                    self._bleed_out(home, time.monotonic())
+                    self._bleed_out(home, time.monotonic(), event.observed_at_ns)
         for i, shown in enumerate(self.recent):
             if shown.event_id == event.event_id:
                 self.recent[i] = event
@@ -307,6 +360,53 @@ class Ledger:
 
     def _known(self) -> list[Team]:
         return [t for t in self.teams.values() if t.id is not None]
+
+    def draw(self) -> dict[int | None, tuple[dict[str, str], int]]:
+        """What the board draws for each team: every player's state (alive, knocked, dead or
+        unsure) and how many of its never-seen slots show assumed alive (the rest unsure).
+
+        With the HUD count (it counts knocked players too) alive marks cannot outnumber the players
+        alive: the count less the recalled players the board still has dead goes to knocked
+        players first, then to players by how recently the feed showed them standing (unconfirmed
+        ones last), then to never-seen slots of the teams seen standing, most recent first, then to
+        players whose badge was not read. Whoever it leaves no room for is drawn unsure: deaths
+        the feed or the reader missed, members of underfilled squads (live match 4 endgame: 2
+        alive, the board drew 35 alive marks). On 3 live matches a team's drawn standing marks equal its players alive 67-79% of the time
+        (was 67-74%); drawing ran-out knocks unsure regardless cost up to 4 points of that (most
+        of them were revived).
+        Without the count: never-seen slots stay assumed unless the team may be wiped."""
+        out: dict[int | None, tuple[dict[str, str], int]] = {}
+        for t in self.teams.values():
+            states = {n: p.status.value for n, p in t.players.items()}
+            open_slots = 0 if t.id is None or t.eliminated else t.total - len(t.players)
+            out[t.id] = (states, 0 if t.maybe_out else open_slots)
+        if self.alive_count is None:
+            return out
+        budget = max(0, self.alive_count.count - self.returned)
+        live = [t for t in self.teams.values() if t.id is not None and not t.eliminated]
+        standing = sorted(((t, n, p) for t in live for n, p in t.players.items()
+                           if p.status is not Status.DEAD),
+                          key=lambda x: (x[2].status is not Status.KNOCKED, not x[2].sure, -x[2].seen_ns))
+        drawn: set[int | None] = set()
+        for t, n, _ in standing:
+            if budget > 0:
+                budget -= 1
+                drawn.add(t.id)
+            else:
+                out[t.id][0][n] = "unsure"
+        for t in sorted(live, key=lambda t: (t.id not in drawn, -t.last_ns)):
+            states, _ = out[t.id]
+            slots = 0 if t.maybe_out else t.total - len(t.players)
+            out[t.id] = (states, min(slots, budget))
+            budget -= out[t.id][1]
+        # Unread badges: most are members of the teams above, so only what is left over.
+        for n, st in (out[None][0] if None in out else {}).items():
+            if st != "dead":
+                if budget > 0:
+                    budget -= 1
+                else:
+                    out[None][0][n] = "unsure"
+        return out
 
     @property
     def placed(self) -> int:
@@ -368,19 +468,6 @@ class Ledger:
         # full unseen squads can add up past the lobby: cap at the lobby less the deaths seen.
         dead = sum(t.dead for t in self.teams.values())
         return max(0, min(sum(t.remaining for t in seen) + unseen, LOBBY_PLAYERS - dead))
-
-    @property
-    def unseen_unsure(self) -> bool:
-        """The HUD count leaves room for fewer than half of all never-seen squad slots to be alive
-        (lobbies run short teams, and the feed misses deaths), so they are drawn unsure instead of
-        assumed alive.
-        ponytail: one share for every team; per-team odds would need team sizes the feed never shows."""
-        if self.alive_count is None or not self.team_count:
-            return False
-        known = self._known()
-        slots = sum(t.total - len(t.players) for t in known if not t.eliminated)
-        slots += max(0, self.team_count - len(known)) * self.squad_size
-        return slots > 0 and self.alive_count.count - self.placed < slots / 2
 
     @property
     def knocked_now(self) -> int:

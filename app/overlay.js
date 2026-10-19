@@ -35,7 +35,7 @@
     li.dataset.sig = sig;
     const pips = li.querySelector('.pips');
     // a pip lit for a knock or kill goes red, for anything else (first seen, comeback) yellow
-    pips.innerHTML = slots.map((s) => `<span class="pip hot-able${s.st === 'alive' ? '' : ' loss'}">${KF.glyph(s.kind)}</span>`).join('')
+    pips.innerHTML = slots.map((s) => `<span class="pip hot-able${s.kind === 'knocked' || s.kind === 'dead' ? ' loss' : ''}">${KF.glyph(s.kind)}</span>`).join('')
       + (team.maybe_out // words, not just a fainter ring; quieter on one seen member (weak, early)
         ? `<span class="maybe-tag${team.players.length === 1 ? ' weak' : ''}">전멸 가능</span>` : '');
     slots.forEach((s, i) => KF.heat(pips.children[i], Math.max(s.at, s.back)));
@@ -54,7 +54,8 @@
   function render() {
     if (!snap) return;
     const t0 = KF.now();
-    const live = snap.teams.filter((t) => !t.out); // engine sends teams ranked (Ledger.ranked)
+    // engine sends teams ranked (Ledger.ranked); the unread-badge bucket is no team: board only
+    const live = snap.teams.filter((t) => !t.out && t.id != null);
     const hot = live.slice(ROWS).filter((t) => t.at && t0 - t.at < KF.HOLD).slice(0, 3); // never hide a change
     const shown = live.slice(0, ROWS - hot.length).concat(hot);
 

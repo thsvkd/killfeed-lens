@@ -133,14 +133,16 @@ const KF = (() => {
    *  maybe_out. */
   const unseen = (team) => team.unseen ?? (team.maybe_out ? 'unsure' : 'assumed');
 
-  /** One entry per squad slot. Slots never seen in the feed are drawn as `team.unseen` says:
-   *  assumed alive (Team.pips) or unsure (the team may be wiped, or the HUD count leaves room for
-   *  fewer than half of them). */
+  /** One entry per squad slot. Of the slots never seen in the feed, `team.assumed` (as many as the
+   *  HUD count leaves room for, Ledger.draw) are drawn assumed alive and the rest unsure; older
+   *  engines send only `team.unseen` for all of them. Players come as drawn: alive, knocked, dead,
+   *  or unsure (the HUD count has no room for them). */
   function slots(team) {
     const seen = team.players.map((p) => ({ ...p, kind: p.st }));
-    const kind = unseen(team);
     const pad = Math.max(0, team.slots - seen.length);
-    return seen.concat(Array.from({ length: pad }, () => ({ name: null, st: 'alive', kind, at: 0, back: 0 })));
+    const assumed = team.assumed ?? (unseen(team) === 'assumed' ? pad : 0);
+    return seen.concat(Array.from({ length: pad }, (_, i) => (
+      { name: null, st: 'alive', kind: i < assumed ? 'assumed' : 'unsure', at: 0, back: 0 })));
   }
 
   /** Until a start count or a confirmed top badge sets the lobby size, the engine's counts cover

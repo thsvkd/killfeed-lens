@@ -317,10 +317,13 @@ def test_team_state_report_scores_the_board_against_telemetry_by_player_names():
 
     report = team_state_report(session, observed, raw, map_telemetry(raw), offset_seconds=0.0)
 
-    half = {"dead": 0.5, "kills": 0.5, "eliminated": 0.5}
+    # The board misses Fox's death, yet draws team 7 with no one standing: the HUD's 4 alive go to
+    # Hunter and the 3 never-seen slots of his team first, none to team 7's last slot.
+    half = {"dead": 0.5, "kills": 0.5, "eliminated": 0.5, "alive": 1.0}
     assert report["summary"] == {
         "checkpoints": 3, "team_checks": 6, "vs_truth": half, "vs_oracle": half,
-        "oracle_vs_truth": {"dead": 1.0, "kills": 1.0, "eliminated": 1.0},
+        "oracle_vs_truth": {"dead": 1.0, "kills": 1.0, "eliminated": 1.0, "alive": 1.0},
+        "alive_mean_error": 0.0,
         "teams_left_in_range": 1.0, "teams_left_unknown": 0, "teams_left_mean_width": 1.0,
         "oracle_teams_left_in_range": 1.0}
     last = report["checkpoints"][-1]

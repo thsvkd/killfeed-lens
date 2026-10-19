@@ -52,18 +52,21 @@ changes every second would make the engine emit every second.
                                               //   teams, the "??" bucket, eliminated teams last
     {"id": 12,                                // badge; null = "??" bucket for unreadable badges
      "kills": 3, "knocks": 2,                 // kills credited, knocks dealt
-     "out": false, "left": 3,                 // eliminated, remaining
+     "out": false, "left": 3,                 // eliminated, standing marks drawn (maybe_out: not seen dead)
      "maybe_out": false,                      // every seen member down and none knocked after the
                                               //   last death seen (a knock means a teammate stands),
                                               //   fewer than a squad seen: may be wiped
      "slots": 4,                              // Team.total; UI pads players with never-seen slots
-     "unseen": "assumed",                     // how to draw them: "assumed" (alive) | "unsure" ("?":
-                                              //   maybe_out, or the HUD leaves room for fewer than
-                                              //   half of all never-seen slots, lobby-wide)
+     "assumed": 2,                            // Ledger.draw: how many of them to draw assumed alive
+                                              //   (the HUD count has room for), the rest "?" unsure
+     "unseen": "assumed",                     // older UIs: all of them "assumed" | "unsure"
      "at": 812100,                            // Team.touched (change highlight)
      "atk": 812100, "hit": 0,                 // last kill/knock it dealt / took (UI: blue / red)
      "players": [{"name": "SnowFox", "st": "alive", "at": 812100, "back": 0}]}
-                                              // st: alive | knocked | dead; back: last comeback
+                                              // st: alive | knocked | dead | unsure (Ledger.draw:
+                                              //   the HUD count, which counts knocked players, has
+                                              //   no room for it; a missed death or bleed-out);
+                                              //   back: last comeback
   ],
   "events": [                                 // newest first, at most 20 (Ledger.recent)
     {"kind": "kill",                          // EventType value
@@ -78,10 +81,13 @@ changes every second would make the engine emit every second.
 }
 ```
 
-`teams_left_min`, `maybe_out`, `unseen`, `atk`, `hit`, `placed` and `match_over` are additive in
+`teams_left_min`, `maybe_out`, `unseen`, `assumed`, `atk`, `hit`, `placed` and `match_over` are additive in
 v1; a UI that does not know them shows the plain `teams_left` and draws never-seen slots by
 `maybe_out`. The UI shows "min~max" while they differ, `0~left` remaining for a `maybe_out` team
-(with "전멸 가능"), and never-seen slots as `unseen` says. With a HUD count the range comes from it
+(with "전멸 가능"), and never-seen slots as `assumed` says. With a HUD count the board draws no more
+alive marks than it shows: knocked players first, then players by how recently the feed showed them
+standing, then never-seen slots of the teams seen standing, less the players a recall brought back
+that the feed has not shown yet; a team with no room left at all is sent `maybe_out`. The range comes from it
 (Ledger.teams_left_min: at least count / squad teams; teams_left: the teams seen standing plus as
 many others as the count's unplaced players can make, after they fill 90% of those teams'
 never-seen slots), not from the teams the feed shows standing alone, since some of those are deaths

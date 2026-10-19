@@ -213,13 +213,19 @@ def test_the_hud_count_bounds_teams_left_without_trusting_seen_alive_members():
     # at least 5 / 4 squads; the standing 7, 9, 11, 12 (a1, x1, z1, w1 knocked) take 4 of the 5
     # players, and the fifth most likely fills one of their 12 empty slots (10 taken as filled)
     assert (ledger.teams_left_min, ledger.teams_left) == (2, 4)
-    assert ledger.placed == 4 and ledger.unseen_unsure  # one player for 18 + 17 * 4 unseen slots
+    drawn = ledger.draw()  # the 4 seen standing, then one never-seen slot of the latest teams
+    assert ledger.placed == 4 and [(k, a) for k, (_, a) in drawn.items() if a] in ([(11, 1)], [(12, 1)])
+    assert "unsure" not in {st for states, _ in drawn.values() for st in states.values()}
 
     ledger.observe_alive_count(AliveCount(3, 0, 0))  # fewer than the feed shows standing:
     assert (ledger.teams_left_min, ledger.teams_left) == (1, 3)  # missed deaths, HUD wins
+    drawn = ledger.draw()  # the one seen standing longest ago is drawn unsure, no slot assumed
+    assert drawn[7][0]["a1"] == "unsure" and not any(a for _, a in drawn.values())
     ledger.observe_alive_count(AliveCount(90, 0, 0))
     assert (ledger.teams_left_min, ledger.teams_left) == (23, 25)
-    assert not ledger.unseen_unsure  # room for nearly every unseen slot: assumed alive
+    assert all(a == ledger.teams[k].total - len(ledger.teams[k].players)  # room for every slot
+               for k, (_, a) in ledger.draw().items() if not ledger.teams[k].eliminated
+               and not ledger.teams[k].maybe_out)
 
 
 def test_ranked_puts_the_teams_the_board_knows_best_first():
@@ -232,3 +238,102 @@ def test_ranked_puts_the_teams_the_board_knows_best_first():
     squad_down(ledger, 20, 4)  # eliminated
     # 7 and 30 have 3 unseen slots (7 has a kill); 9 and 12 may be wiped (2 unseen slots each)
     assert [t.id for t in ledger.ranked()] == [15, 7, 30, 9, 12, None, 20]
+
+
+def test_a_full_squad_takes_a_close_misread_as_a_member_but_not_a_stranger():
+    ledger = Ledger(squad_size=4, teams=25)
+    for name in ("Bravo", "Charlie", "Delta", "Echo"):
+        ledger.apply(ev(name, 7, "v" + name, 9, K))
+    ledger.apply(ev("Charlle", 7, "w1", 9))  # one letter off a member of the full squad
+    ledger.apply(ev("Zulu-Wolf", 7, "w2", 9))  # unlike any: someone else under a misread badge
+    assert sorted(ledger.teams[7].players) == ["Bravo", "Charlie", "Delta", "Echo", "Zulu-Wolf"]
+    assert ledger.teams[7].players["Charlie"].kills == 1
+    ledger.apply(ev("x1", 11, "Br", 7))  # too short to be a PUBG name: part of a member's
+    assert ledger.teams[7].players["Bravo"].status is Status.DEAD and "Br" not in ledger.teams[7].players
+
+
+def test_a_short_read_goes_to_the_member_it_is_most_like():
+    ledger = Ledger(squad_size=4, teams=25)
+    for name in ("Alexander", "Lex9"):
+        ledger.apply(ev(name, 7, "v" + name, 9, K))
+    ledger.apply(ev("x1", 11, "Lex", 7))  # part of both names; far more of Lex9's
+    assert ledger.teams[7].players["Lex9"].status is Status.DEAD
+    assert ledger.teams[7].players["Alexander"].status is Status.ALIVE
+
+def test_recalled_players_hold_their_share_of_the_hud_count_until_the_feed_shows_them():
+    from kfocr.domain.models import AliveCount
+
+    ledger = Ledger(squad_size=4, teams=25)
+    for victim in ("b1", "b2", "b3"):
+        ledger.apply(ev("a1", 7, victim, 9))
+    held = lambda count, s: ledger.observe_alive_count(AliveCount(count, 0, int(s * 1e9)))  # noqa: E731
+    held(10, 0), held(10, 3)
+    held(12, 4), held(12, 7)  # a recall wave brings two back
+    assert ledger.returned == 2
+    ledger.apply(ev("b1", 9, "c1", 11))  # one of them shows up: alive again, one still unplaced
+    assert ledger.teams[9].players["b1"].status is Status.ALIVE and ledger.returned == 1
+    held(99, 8), held(99, 11)  # a misread jump is not a recall wave
+    assert ledger.returned == 1
+
+
+def test_a_count_misread_for_a_moment_is_no_recall_wave():
+    from kfocr.domain.models import AliveCount
+
+    ledger = Ledger(squad_size=4, teams=25)
+    for victim in ("b1", "b2", "b3", "b4", "b5", "b6"):
+        ledger.apply(ev("a1", 7, victim, 9))
+    for n, s in ((30, 0), (30, 3), (24, 4), (24, 4.5), (30, 5), (30, 8), (37, 9), (30, 10), (30, 14)):
+        ledger.observe_alive_count(AliveCount(n, 0, int(s * 1e9)))
+    assert ledger.returned == 0
+
+
+def test_a_knocked_teammate_bleeding_out_with_the_squad_is_not_a_second_death():
+    from kfocr.domain.models import AliveCount
+
+    ledger = Ledger(squad_size=2, teams=50)
+    ledger.apply(ev("a1", 7, "b1", 9, K))
+    ledger.apply(ev("a1", 7, "b2", 9))  # the last one standing dies: b1 bleeds out with it
+    for n, s in ((10, 0), (10, 3), (12, 4), (12, 7)):
+        ledger.observe_alive_count(AliveCount(n, 0, int(s * 1e9)))
+    ledger.apply(ev("a1", 7, "b1", 9, ns=ledger.last_ns + 2_000_000_000))  # its bleed-out row
+    assert ledger.returned == 2
+
+
+def test_unread_badges_get_only_the_count_the_teams_leave():
+    from kfocr.domain.models import AliveCount
+
+    ledger = Ledger(squad_size=4, teams=25)
+    ledger.apply(ev("a1", 5, "x", 7))
+    ledger.apply(ev("a2", 5, "y", 7))
+    ledger.apply(ev("z", None, "w", 7))  # badge unread: likely team 5's third member
+    ledger.observe_alive_count(AliveCount(4, 0, 0))
+    drawn = ledger.draw()
+    assert (drawn[5][0]["a1"], drawn[5][0]["a2"], drawn[5][1]) == ("alive", "alive", 2)
+    assert drawn[None][0]["z"] == "unsure"
+
+
+def test_the_hud_count_goes_to_knocked_then_recently_seen_players_first():
+    from kfocr.domain.models import AliveCount
+
+    ledger = Ledger(squad_size=4, teams=25)
+    ledger.apply(ev("old", 7, "o1", 9))  # 'old' seen standing first
+    ledger.apply(ev("new", 11, "n1", 12, K))  # then 'new' knocks 'n1'
+    ledger.observe_alive_count(AliveCount(2, 0, 0))
+    drawn = ledger.draw()
+    # knocked n1 (the HUD counts knocked players) and the latest seen 'new' take both; the
+    # stale 'old' is drawn unsure and no never-seen slot is assumed alive
+    assert (drawn[12][0]["n1"], drawn[11][0]["new"], drawn[7][0]["old"]) == ("knocked", "alive", "unsure")
+    assert not any(assumed for _, assumed in drawn.values())
+
+
+def test_a_knock_that_runs_out_is_drawn_last_when_the_count_is_short():
+    from kfocr.domain.models import AliveCount
+
+    ledger = Ledger(squad_size=4, teams=25)
+    ledger.apply(ev("a1", 7, "b1", 9, K))
+    ledger.expire(ledger.last_ns + KNOCK_TIMEOUT_NS, 0.0)  # no news for the bleed-out time
+    b1 = ledger.teams[9].players["b1"]
+    assert b1.status is Status.ALIVE and not b1.sure  # most likely revived, maybe dead
+    ledger.observe_alive_count(AliveCount(1, 0, 0))
+    drawn = ledger.draw()
+    assert (drawn[7][0]["a1"], drawn[9][0]["b1"]) == ("alive", "unsure")
