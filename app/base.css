@@ -1,5 +1,6 @@
-/* Shared tokens. Status hues are the Okabe-Ito set the Tk app already uses (colour-blind safe);
-   every text colour is >= 4.5:1 on --panel, every glyph colour >= 3:1. */
+/* Shared tokens. Status hues are the Okabe-Ito set the Tk app already uses (colour-blind safe),
+   plus --red for losses (dead cross, victim side); every text colour is >= 4.5:1 on --panel, every
+   glyph colour >= 3:1. */
 :root {
   --bg: #0A0D12;
   --panel: #10141B;
@@ -11,7 +12,8 @@
   --faint: #7A8391;
   --alive: #56B4E9;
   --knock: #E69F00;
-  --dead: #6E7681;
+  --red: #FF5A4A; /* dead cross, the victim side, a team that just lost a member (6:1 on --panel) */
+  --atk: #56B4E9; /* the attacking side, a team that just dealt a kill or knock */
   --hot: #F0E442;
   --kill: #F78166;
   --font-ui: "Pretendard Variable", Pretendard, "Malgun Gothic", "맑은 고딕", sans-serif;
@@ -43,25 +45,45 @@ body {
 
 .g { width: 1em; height: 1em; flex: none; display: block; }
 .g-alive, .g-assumed { color: var(--alive); }
-.g-unsure { color: var(--faint); }
+.g-unsure { color: var(--dim); }
 .g-knocked { color: var(--knock); }
-.g-dead { color: var(--dead); }
-.g-back { color: var(--hot); }
+.g-dead { color: var(--red); }
 .g-other { color: var(--dim); }
 .g-kill { color: var(--dim); }
 
-/* Change highlight: lit at once, then dimmed in two discrete steps (KF.heat). No CSS transitions:
-   with software compositing on a 144 Hz screen a 0.6 s fade is ~86 CPU-composited frames per
-   change; two steps are two repaints. */
+/* Team badge: a box in the game's team colour (--tc, set per team number by KF.inject), white
+   digits like the game. "??" (unreadable badge) stays unfilled and dim. */
+.badge, .tb {
+  display: inline-block;
+  padding: 0 .3em;
+  min-width: 1.9em;
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 3px;
+  background: var(--tc, transparent);
+  color: #fff;
+  text-align: center;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, .55);
+}
+.badge.unknown, .tb.unknown { color: var(--dim); text-shadow: none; border-color: var(--line-2); }
+
+/* Event line sides: attacker blue, victim red (the badge keeps its own fill). */
+.side-atk { color: var(--atk); }
+.side-vic { color: var(--red); }
+
+/* Change highlight: lit at once, then KF.heat steps --fade down to 0 on timers. No CSS transitions:
+   hardware acceleration is off and a game runs next to us, and a running transition, even a
+   stepped one, makes Chromium produce a frame at every vsync. `atk` / `hit` / `loss` only recolour
+   it (blue / red; yellow otherwise). */
+.hot-able { --hot-c: var(--hot); --hot-rgb: 240, 228, 66; }
+.hot-able.atk { --hot-c: var(--atk); --hot-rgb: 86, 180, 233; }
+.hot-able.hit, .hot-able.loss { --hot-c: var(--red); --hot-rgb: 255, 90, 74; }
 .hot-able::before {
   content: "";
   position: absolute;
   pointer-events: none;
   opacity: 0;
 }
-.hot-able.hot::before { opacity: 1; }
-.hot-able.hot.cool1::before { opacity: .5; }
-.hot-able.hot.cool2::before { opacity: .2; }
+.hot-able.hot::before { opacity: var(--fade, 1); }
 
 .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 

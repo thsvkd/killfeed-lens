@@ -1,12 +1,23 @@
 'use strict';
 // Shared by the board and the overlay: glyph sprite, labels, the engine clock, change highlights.
-// Shape always carries the meaning, colour only repeats it (same rules as the Tk app):
+// Shape always carries the meaning, colour only repeats it:
 // alive = filled circle, assumed (squad slot never seen) = dashed ring, knocked = diamond,
-// dead = cross, comeback = up-triangle, unsure (never-seen slot of a team that may be wiped) =
-// thin solid ring, always next to the words "전멸 가능".
+// dead = red cross, unsure (never-seen slot that may not be alive: its team may be wiped, next to
+// the words "전멸 가능", or the HUD count leaves room for fewer than half of them) = question
+// mark. A comeback is a plain alive glyph, only lit for a moment.
+// Colour on events: attacker side blue, victim side red; team badges wear the game's team colour.
 const KF = (() => {
   const HOLD = 4000; // ms a change stays highlighted (Tk FLASH_S)
-  const COOL = [600, 300]; // the last 600 ms at half strength, the last 300 ms fainter still
+  const FADE = 900; // ms the highlight fades out, ending at HOLD
+  const STEPS = 6; // ... in this many steps (KF.heat)
+  // Fixed per team NUMBER in the game (medians of real badge crops); 26-50 are darker than 1-25.
+  // 11, 12, 14 and 23 are 3-13% darker than measured so the white digits keep 4.5:1.
+  const TEAM_COLORS = [null,
+    '#203E98', '#037A73', '#962709', '#045073', '#52248A', '#742B1E', '#364A0B', '#92274D', '#745227', '#5E113C',
+    '#88751F', '#43807D', '#566369', '#A06C17', '#385261', '#AB5F79', '#0A534E', '#643B11', '#5A771F', '#664672',
+    '#3A7C60', '#62798F', '#946D5B', '#3A3572', '#6A6615', '#1E3463', '#025957', '#6D2207', '#044455', '#47225F',
+    '#63291C', '#2E390A', '#5F1F37', '#4C371F', '#4D0E31', '#665B21', '#365A59', '#3B4448', '#745C17', '#293B42',
+    '#414F62', '#0A403E', '#442E0D', '#44561C', '#503A5B', '#366153', '#505F6E', '#725448', '#343055', '#565412'];
   const VERB = { kill: '처치', knock: '기절', finish: '마무리', bleedout: '출혈사',
                  suicide: '자살', environment: '환경사', unknown: '?' };
   const STATUS = { alive: '생존', knocked: '기절', dead: '사망', assumed: '미확인', unsure: '생존 불명' };
@@ -14,10 +25,9 @@ const KF = (() => {
   const SPRITE = `<svg class="sprite" width="0" height="0" aria-hidden="true">
     <symbol id="g-alive" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="currentColor"/></symbol>
     <symbol id="g-assumed" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-dasharray="2.6 2.1"/></symbol>
-    <symbol id="g-unsure" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.3"/></symbol>
+    <symbol id="g-unsure" viewBox="0 0 16 16"><path d="M5.5 6.1C5.5 4.5 6.6 3.4 8.1 3.4s2.5 1 2.5 2.4c0 1.9-2.5 2.1-2.5 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="8.1" cy="12.6" r="1.15" fill="currentColor"/></symbol>
     <symbol id="g-knocked" viewBox="0 0 16 16"><path d="M8 .9 15.1 8 8 15.1.9 8Z" fill="currentColor"/></symbol>
     <symbol id="g-dead" viewBox="0 0 16 16"><path d="M3.6 3.6l8.8 8.8M12.4 3.6l-8.8 8.8" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></symbol>
-    <symbol id="g-back" viewBox="0 0 16 16"><path d="M8 2.5 14 12.5H2Z" fill="currentColor"/></symbol>
     <symbol id="g-other" viewBox="0 0 16 16"><rect x="3.4" y="3.4" width="9.2" height="9.2" rx="1" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
     <symbol id="g-kill" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="8" cy="8" r="4.4"/><path d="M8 .8v3.4M8 11.8v3.4M.8 8h3.4M11.8 8h3.4"/></g></symbol>
     <symbol id="g-live" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.5" fill="currentColor"/><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-opacity=".45" stroke-width="1.5"/></symbol>
@@ -34,6 +44,11 @@ const KF = (() => {
   const now = () => performance.now() + skew;
 
   const badge = (id) => (id == null ? '??' : String(id).padStart(2, '0'));
+  /** Class that sets --tc to the team's colour (inject() writes the rules); '' for the "??" bucket. */
+  const teamClass = (id) => {
+    if (id == null || id < 1) return '';
+    return `tc${id > 50 ? ((id - 26) % 25) + 26 : id}`; // solo lobbies count past 50
+  };
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
   const clip = (s, n) => (!s ? '-' : s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 
@@ -59,12 +74,24 @@ const KF = (() => {
     if (el.dataset.html !== markup) { el.dataset.html = markup; el.innerHTML = markup; }
   }
 
-  /** "12 SnowFox → 07 MadWolf" with names clipped to n; just the victim when nobody got credit. */
+  /** Team badge in the game's colour, to put into markup built here. */
+  const tb = (id) => `<span class="tb ${teamClass(id) || 'unknown'}">${badge(id)}</span>`;
+
+  /** A badge element (overlay row, board card): its text and colour class. */
+  function paintBadge(el, id) {
+    text(el, badge(id));
+    const c = teamClass(id);
+    if (el._tc !== c) { if (el._tc) el.classList.remove(el._tc); if (c) el.classList.add(c); el._tc = c; }
+    el.classList.toggle('unknown', id == null);
+  }
+
+  /** "12 SnowFox → 07 MadWolf" with names clipped to n, attacker blue and victim red; just the
+   *  victim when nobody got credit. */
   function who(e, n) {
-    const side = (team, name) => `<span class="tb">${badge(team)}</span>${esc(clip(name, n))}`;
+    const side = (role, team, name) => `<span class="${role}">${tb(team)}${esc(clip(name, n))}</span>`;
     return e.killer || e.kt != null
-      ? `${side(e.kt, e.killer)}<span class="arrow">→</span>${side(e.vt, e.victim)}`
-      : side(e.vt, e.victim);
+      ? `${side('side-atk', e.kt, e.killer)}<span class="arrow">→</span>${side('side-vic', e.vt, e.victim)}`
+      : side('side-vic', e.vt, e.victim);
   }
 
   /** The 2 px divider gauge: players left out of the starting field; empty while that is unknown. */
@@ -73,30 +100,46 @@ const KF = (() => {
     el.style.transform = `scaleX(${total ? Math.min(1, snap.players_left / total) : 0})`;
   }
 
-  /** Light `el` with `cls` until HOLD ms after `at`; 'hot' also dims in two steps before it goes
-   *  out. Timers, not animations: 1-3 repaints per change, nothing while idle. */
-  function heat(el, at, cls = 'hot') {
-    el._heat ??= {};
-    for (const t of el._heat[cls] ?? []) clearTimeout(t);
+  /** Light `el` (class 'hot') until HOLD ms after `at`, fading out over the last FADE ms in
+   *  STEPS timer steps: one repaint each and nothing in between or while idle (a CSS transition,
+   *  even a stepped one, ticks every frame: 2x the overlay's CPU in the demo). A node rebuilt
+   *  mid-fade starts at the step it is due, so it never flashes back to full. */
+  function heat(el, at) {
+    for (const t of el._heat ?? []) clearTimeout(t);
+    el._heat = [];
     const left = at ? at + HOLD - now() : 0;
-    if (cls === 'hot') el.classList.remove('cool1', 'cool2');
-    if (left <= 0) { el.classList.remove(cls); return; }
-    el.classList.add(cls);
-    const timers = [setTimeout(() => el.classList.remove(...(cls === 'hot' ? [cls, 'cool1', 'cool2'] : [cls])), left)];
-    if (cls === 'hot') {
-      COOL.forEach((before, i) => {
-        if (left > before) timers.push(setTimeout(() => el.classList.add(`cool${i + 1}`), left - before));
-      });
-    }
-    el._heat[cls] = timers;
+    const step = (i) => { // i steps into the fade; STEPS = out
+      el.classList.toggle('hot', i < STEPS);
+      if (i < STEPS) el.style.setProperty('--fade', String(1 - i / STEPS));
+    };
+    const start = left - FADE; // ms until the fade starts
+    const done = left <= 0 ? STEPS : Math.max(0, Math.floor(-start / (FADE / STEPS)));
+    step(done);
+    for (let i = done + 1; i <= STEPS; i++) el._heat.push(setTimeout(() => step(i), start + (i * FADE) / STEPS));
   }
 
-  /** One entry per squad slot. Slots never seen in the feed are assumed alive (Team.pips), unless
-   *  everyone seen is down: then the team may already be wiped and they are unsure. */
+  /** Colour of a team's highlight: blue when its latest change was dealing a kill or knock, red when
+   *  it lost a member, yellow for a comeback or anything else (`at` newer than both) and whenever
+   *  the engine sends no atk/hit. */
+  function tone(el, team) {
+    const a = team.atk ?? 0;
+    const h = team.hit ?? 0;
+    const t = team.at > Math.max(a, h) ? '' : a > h ? 'atk' : h > a ? 'hit' : ''; // one clock read per event
+    el.classList.toggle('atk', t === 'atk');
+    el.classList.toggle('hit', t === 'hit');
+  }
+
+  /** How a team's never-seen squad slots are drawn: assumed | unsure. Older engines only know
+   *  maybe_out. */
+  const unseen = (team) => team.unseen ?? (team.maybe_out ? 'unsure' : 'assumed');
+
+  /** One entry per squad slot. Slots never seen in the feed are drawn as `team.unseen` says:
+   *  assumed alive (Team.pips) or unsure (the team may be wiped, or the HUD count leaves room for
+   *  fewer than half of them). */
   function slots(team) {
     const seen = team.players.map((p) => ({ ...p, kind: p.st }));
+    const kind = unseen(team);
     const pad = Math.max(0, team.slots - seen.length);
-    const kind = team.maybe_out ? 'unsure' : 'assumed';
     return seen.concat(Array.from({ length: pad }, () => ({ name: null, st: 'alive', kind, at: 0, back: 0 })));
   }
 
@@ -134,9 +177,15 @@ const KF = (() => {
     return `${badge(team.id)}팀 · ${left} · 기절 ${n('knocked')} · 사망 ${n('dead')} · 처치 ${team.kills}`;
   }
 
-  function inject() { document.body.insertAdjacentHTML('afterbegin', SPRITE); }
+  function inject() {
+    document.body.insertAdjacentHTML('afterbegin', SPRITE);
+    // a constructed sheet, not a <style> or style="": the CSP allows no inline styles
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(TEAM_COLORS.map((c, n) => (n ? `.tc${n}{--tc:${c}}` : '')).join(''));
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+  }
 
-  return { HOLD, VERB, STATUS, glyph, sync, now, badge, esc, clip, ago, text, attr, html, who, gauge,
-           heat, slots, teamsLeft, playersLeft, count, eventKind, eventGlyph, playersBasis,
+  return { HOLD, VERB, STATUS, glyph, sync, now, esc, clip, ago, text, attr, html, who, gauge,
+           paintBadge, heat, tone, slots, teamsLeft, playersLeft, count, eventKind, eventGlyph, playersBasis,
            teamSummary, inject };
 })();

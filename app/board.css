@@ -131,6 +131,8 @@ kbd {
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .legend .g { font-size: 11px; }
 .legend-hot i { width: 12px; height: 12px; border-radius: 3px; box-shadow: inset 0 0 0 2px var(--hot); }
+.legend-hot.atk i { box-shadow: inset 0 0 0 2px var(--atk); }
+.legend-hot.hit i { box-shadow: inset 0 0 0 2px var(--red); }
 
 /* --- body: cards + side column ----------------------------------------------------------- */
 .body {
@@ -140,9 +142,29 @@ kbd {
   border-top: 1px solid var(--line);
 }
 
+.col { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+.cards-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 16px 0 20px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; background: var(--raise); overflow: hidden; }
+.seg button:focus-visible { outline-offset: -2px; border-radius: 0; } /* the clipped .seg would cut the ring */
+.seg button { height: 26px; padding: 0 11px; border: 0; background: transparent; color: var(--dim); font-size: 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button:hover { background: #1C2330; }
+.seg button[aria-pressed="true"] { background: #263042; color: var(--text); font-weight: 700; }
+.sort { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-size: 12px; }
+.sort select {
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--raise);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
 .cards {
   overflow: auto;
-  padding: 14px 16px 20px 20px;
+  padding: 10px 16px 20px 20px;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
   gap: 10px;
@@ -159,10 +181,9 @@ kbd {
   border: 1px solid var(--line);
   border-radius: 8px;
 }
-.card::before { inset: -1px; border: 2px solid var(--hot); border-radius: 8px; }
+.card::before { inset: -1px; border: 2px solid var(--hot-c); border-radius: 8px; }
 .card-h { display: flex; align-items: center; gap: 8px; }
-.badge { font-size: 25px; font-weight: 600; line-height: 1; letter-spacing: .3px; }
-.badge.unknown { color: var(--dim); }
+.badge { font-size: 20px; font-weight: 700; line-height: 1.25; letter-spacing: .3px; }
 .out-tag {
   display: none;
   padding: 2px 6px;
@@ -196,14 +217,13 @@ kbd {
   height: 21px;
   font-size: 12.5px;
 }
-.slot::before { inset: 0 -6px; border-radius: 4px; background: rgba(240, 228, 66, .13); box-shadow: inset 2px 0 0 var(--hot); }
+.slot::before { inset: 0 -6px; border-radius: 4px; background: rgba(var(--hot-rgb), .13); box-shadow: inset 2px 0 0 var(--hot-c); }
 .slot .g { position: relative; font-size: 12px; }
 .slot .nm { position: relative; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slot .st { position: relative; margin-left: auto; flex: none; font-size: 11px; font-weight: 700; }
 .s-knocked .st { color: var(--knock); }
 .s-dead .nm, .s-assumed .nm, .s-unsure .nm { color: var(--faint); }
-.slot .st.back { color: var(--hot); display: inline-flex; align-items: center; gap: 3px; }
-.slot .st.back .g { font-size: 8px; }
+.slot .st.back { color: var(--hot); }
 .slot.more-slots { color: var(--faint); font-size: 11.5px; padding-left: 20px; }
 
 .card-f {
@@ -218,7 +238,7 @@ kbd {
 .card-f b { font-family: var(--font-num); font-weight: 600; color: var(--text); }
 
 .card.out { background: transparent; border-style: dashed; }
-.card.out .badge { color: var(--faint); text-decoration: line-through 2px var(--faint); }
+.card.out .badge { opacity: .5; text-decoration: line-through 2px; }
 .card.out .out-tag { display: inline-block; }
 .card.out .kills b, .card.out .card-f b { color: var(--dim); }
 .card.out .slots { opacity: .7; }
@@ -249,7 +269,7 @@ kbd {
 .ev .g { grid-row: span 2; font-size: 11px; margin-top: 3px; }
 .ev .g-dead { color: var(--kill); }
 .ev-who { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; }
-.ev-who .tb { font-family: var(--font-num); font-weight: 600; color: var(--dim); margin-right: 4px; }
+.ev-who .tb { font: 700 11px/15px var(--font-num); margin-right: 5px; }
 .ev-who .arrow { color: var(--faint); margin: 0 5px; }
 .ev-what { color: var(--dim); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .k-knock { color: var(--knock); font-weight: 600; }

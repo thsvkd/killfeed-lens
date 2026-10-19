@@ -21,9 +21,8 @@
   }
 
   function fillRow(li, team) {
-    const badge = li.firstElementChild;
-    KF.text(badge, KF.badge(team.id));
-    badge.classList.toggle('unknown', team.id == null);
+    KF.paintBadge(li.firstElementChild, team.id);
+    KF.tone(li, team);
     KF.text(li.querySelector('.kills b'), team.kills);
     KF.attr(li, 'aria-label', KF.teamSummary(team));
     if (li.dataset.at !== String(team.at)) {
@@ -35,13 +34,11 @@
     if (li.dataset.sig === sig) return;
     li.dataset.sig = sig;
     const pips = li.querySelector('.pips');
-    pips.innerHTML = slots.map((s) => `<span class="pip hot-able">${KF.glyph(s.kind)}${KF.glyph('back')}</span>`).join('')
+    // a pip lit for a knock or kill goes red, for anything else (first seen, comeback) yellow
+    pips.innerHTML = slots.map((s) => `<span class="pip hot-able${s.st === 'alive' ? '' : ' loss'}">${KF.glyph(s.kind)}</span>`).join('')
       + (team.maybe_out // words, not just a fainter ring; quieter on one seen member (weak, early)
         ? `<span class="maybe-tag${team.players.length === 1 ? ' weak' : ''}">전멸 가능</span>` : '');
-    slots.forEach((s, i) => {
-      KF.heat(pips.children[i], s.at);
-      KF.heat(pips.children[i], s.back, 'back');
-    });
+    slots.forEach((s, i) => KF.heat(pips.children[i], Math.max(s.at, s.back)));
   }
 
   /** Reorder keyed rows in place. No slide animation: at 144 Hz with software compositing every

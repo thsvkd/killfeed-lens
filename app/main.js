@@ -164,9 +164,10 @@ function place() {
 
 /** Same rule as gui.overlay_has_content: before the first event or HUD reading it would only say
  *  "waiting", and any visible topmost window over a borderless game makes DWM compose the game's
- *  frames instead of letting them flip straight to the screen. */
+ *  frames instead of letting them flip straight to the screen. Also nothing once the engine calls
+ *  the match over: a frozen board over the lobby is worse than none. */
 function hasContent() {
-  return Boolean(last && (last.events.length || last.teams.length || last.hud));
+  return Boolean(last && (last.events.length || last.teams.length || last.hud) && !last.match_over);
 }
 
 function syncOverlay() {

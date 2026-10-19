@@ -63,24 +63,21 @@ body {
 .row {
   position: relative;
   display: grid;
-  grid-template-columns: 30px 1fr auto;
+  grid-template-columns: minmax(30px, auto) 1fr auto; /* solo lobbies reach badge 100 */
   align-items: center;
   height: 25px;
   padding: 0 14px;
 }
 .row::before {
   inset: 1px 0;
-  border-left: 3px solid var(--hot);
-  background: linear-gradient(90deg, rgba(240, 228, 66, .2), rgba(240, 228, 66, .04) 70%);
+  border-left: 3px solid var(--hot-c);
+  background: linear-gradient(90deg, rgba(var(--hot-rgb), .2), rgba(var(--hot-rgb), .04) 70%);
 }
-.row .badge { position: relative; font-size: 15px; font-weight: 600; letter-spacing: .3px; }
-.row .badge.unknown { color: var(--dim); }
+.row .badge { position: relative; justify-self: start; font-size: 13px; font-weight: 700; line-height: 17px; }
 
 .pips { position: relative; display: flex; align-items: center; gap: 5px; padding-left: 6px; }
 .pip { position: relative; display: block; font-size: 13px; }
-.pip::before { inset: -3px; border-radius: 50%; box-shadow: 0 0 0 2px var(--hot); }
-.pip .g-back { position: absolute; left: 3px; top: -7px; font-size: 7px; opacity: 0; }
-.pip.back .g-back { opacity: 1; }
+.pip::before { inset: -3px; border-radius: 50%; box-shadow: 0 0 0 2px var(--hot-c); }
 
 .maybe-tag { margin-left: 4px; color: var(--dim); font-size: 10px; white-space: nowrap; }
 .maybe-tag.weak { color: var(--faint); }
@@ -110,7 +107,7 @@ body {
 .last-text { position: relative; min-width: 0; }
 .last p { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .who { font-size: 12.5px; }
-.who .tb { font-family: var(--font-num); font-weight: 600; color: var(--dim); margin-right: 3px; }
+.who .tb { font: 700 11px/15px var(--font-num); margin-right: 4px; }
 .who .arrow { color: var(--faint); margin: 0 4px; }
 .what { margin-top: 2px !important; font-size: 11px; color: var(--dim); }
 .what .k-knock { color: var(--knock); font-weight: 600; }

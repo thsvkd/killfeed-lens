@@ -46,15 +46,35 @@
   <span><svg class="g g-assumed"><use href="#g-assumed"/></svg>미확인(생존 가정)</span>
   <span><svg class="g g-knocked"><use href="#g-knocked"/></svg>기절</span>
   <span><svg class="g g-dead"><use href="#g-dead"/></svg>사망</span>
-  <span><svg class="g g-back"><use href="#g-back"/></svg>복귀(부활·리콜)</span>
-  <span><svg class="g g-unsure"><use href="#g-unsure"/></svg>생존 불명(전멸 가능 팀)</span>
-  <span class="legend-hot"><i></i>방금 바뀜</span>
+  <span><svg class="g g-unsure"><use href="#g-unsure"/></svg>생존 불명</span>
+  <span class="legend-hot atk"><i></i>방금 처치·기절시킴</span>
+  <span class="legend-hot hit"><i></i>방금 처치·기절당함</span>
+  <span class="legend-hot"><i></i>방금 바뀜(복귀 포함)</span>
 </div>
 
 <main class="body">
-  <section id="cards" class="cards" aria-label="팀별 현황">
-    <p class="waiting">킬피드 이벤트를 기다리는 중…</p>
-  </section>
+  <div class="col">
+    <div class="cards-bar" role="group" aria-label="팀 정렬과 필터">
+      <div id="filter" class="seg" role="group" aria-label="보기">
+        <button type="button" data-v="all">전체</button>
+        <button type="button" data-v="alive">생존</button>
+        <button type="button" data-v="out">탈락</button>
+        <button type="button" data-v="maybe">전멸 가능</button>
+      </div>
+      <label class="sort">정렬
+        <select id="sort">
+          <option value="id">팀 번호순</option>
+          <option value="left">남은 인원순</option>
+          <option value="kills">처치순</option>
+          <option value="recent">최근 변화순</option>
+          <option value="sure">확실한 팀 먼저</option>
+        </select>
+      </label>
+    </div>
+    <section id="cards" class="cards" aria-label="팀별 현황">
+      <p class="waiting">킬피드 이벤트를 기다리는 중…</p>
+    </section>
+  </div>
   <aside class="side">
     <section class="feed" aria-labelledby="feed-h">
       <h2 id="feed-h">최근 킬피드</h2>
