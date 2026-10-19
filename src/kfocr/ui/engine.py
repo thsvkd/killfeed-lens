@@ -55,16 +55,18 @@ def _rect(r: NormalizedRect | None) -> list[float] | None:
     return [r.x, r.y, r.w, r.h] if r else None
 
 
-def _team(t: Team) -> dict:
+def _team(t: Team, unsure: bool) -> dict:
     return {"id": t.id, "kills": t.kills, "knocks": t.knocks, "out": t.eliminated,
             "maybe_out": t.maybe_out, "left": t.remaining, "slots": t.total, "at": _ms(t.touched),
+            "unseen": "unsure" if unsure or t.maybe_out else "assumed",
+            "atk": _ms(t.attacked), "hit": _ms(t.hit),
             "players": [{"name": p.name, "st": p.status.value, "at": _ms(p.touched),
                          "back": _ms(p.revived)} for p in t.players.values()]}
 
 
 def snapshot(led: Ledger, *, tracking: bool, status: str, error: bool,
              rois: tuple[NormalizedRect | None, NormalizedRect | None], mode: str = "live",
-             monitor: int = 0, settings: dict | None = None) -> dict:
+             monitor: int = 0, settings: dict | None = None, match_over: bool = False) -> dict:
     """Board snapshot v1. Times are time.monotonic() in ms; 0 = never."""
     events = []
     for e in reversed(list(led.recent)[-KEEP_EVENTS:]):
@@ -72,16 +74,17 @@ def snapshot(led: Ledger, *, tracking: bool, status: str, error: bool,
                        "killer": e.killer_name, "kt": led.team_of(e.killer_name, e.killer_team),
                        "victim": e.victim_name, "vt": led.team_of(e.victim_name, e.victim_team),
                        "weapon": e.weapon_label, "hs": e.headshot})
-    hud = led.alive_count
+    hud, unsure = led.alive_count, led.unseen_unsure
     return {"v": 1, "now": _ms(time.monotonic()), "mode": mode, "monitor": monitor,
-            "tracking": tracking, "status": status, "error": error,
+            "tracking": tracking, "status": status, "error": error, "match_over": match_over,
             "players_left": led.players_left, "teams_left": led.teams_left,
             "teams_left_min": led.teams_left_min,
             "start_teams": led.team_count or None, "squad": led.squad_size,
             "hud": {"count": hud.count, "at": _ms(led.alive_count_at)} if hud else None,
             "basis": _HUD_AGE.sub("", led.basis), "kills": led.total_kills,
             "knocked": led.knocked_now, "last_at": _ms(led.last_at) if led.recent else 0,
-            "teams": [_team(t) for t in led.ranked()], "events": events,
+            "placed": led.placed,
+            "teams": [_team(t, unsure) for t in led.ranked()], "events": events,
             "rois": {"killfeed": _rect(rois[0]), "alive": _rect(rois[1])},
             "settings": settings or {"save_event_crops": False}}
 
@@ -404,7 +407,7 @@ class Engine:
         status, error = self.status
         snap = snapshot(self.led, tracking=self.tracking, status=status, error=error,
                         rois=self.feed.rois, mode=self.feed.mode, monitor=self.feed.monitor,
-                        settings=self.feed.settings)
+                        settings=self.feed.settings, match_over=self.match_over)
         body = {k: v for k, v in snap.items() if k != "now"}
         if body == self._last:
             return

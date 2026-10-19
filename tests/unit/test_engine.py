@@ -91,7 +91,11 @@ def test_snapshot_mirrors_the_ledger_for_the_ui():
     victim = next(t for t in snap["teams"] if t["id"] == 25)
     assert victim["slots"] == 4 and victim["left"] == 4 and victim["at"] > 0
     assert victim["players"] == [{"name": "b1", "st": "knocked", "at": victim["at"], "back": 0}]
-    assert next(t for t in snap["teams"] if t["id"] == 7)["kills"] == 1
+    killer = next(t for t in snap["teams"] if t["id"] == 7)
+    assert killer["kills"] == 1
+    # the UI colours the attacker blue and the victim red
+    assert killer["atk"] > 0 and killer["hit"] == 0 and victim["hit"] > 0 and victim["atk"] == 0
+    assert snap["match_over"] is False
     assert [e["kind"] for e in snap["events"]] == ["kill", "knock"]  # newest first
     assert snap["events"][1] == {"kind": "knock", "clock": "00:00", "killer": "a1", "kt": 7,
                                  "victim": "b1", "vt": 25, "weapon": "M416", "hs": None}
@@ -102,22 +106,35 @@ def test_snapshot_mirrors_the_ledger_for_the_ui():
 
 def test_snapshot_marks_underfilled_teams_that_may_be_wiped_and_gives_the_teams_left_range():
     led = Ledger(squad_size=4, teams=25)
-    led.apply(make_event("a1", 7, "b1", 25, K))  # team 25: two seen, both down, two never seen
+    led.apply(make_event("a1", 7, "b1", 25, D))  # team 25: two seen, both dead, two never seen
     led.apply(make_event("a1", 7, "b2", 25, D))
     for i in range(4):  # team 9: a full squad down is eliminated, not "maybe"
         led.apply(make_event("a2", 7, f"c{i}", 9, D))
+    # team 12: one dead, then one knocked: a knock means a teammate still stands, so not "maybe";
+    # team 13: knocked, then a teammate dead (maybe the one standing): "maybe" again
+    led.apply(make_event("a1", 7, "d1", 12, D, ns=1))
+    led.apply(make_event("a1", 7, "d2", 12, K, ns=2))
+    led.apply(make_event("a1", 7, "e1", 13, K, ns=3))
+    led.apply(make_event("a1", 7, "e2", 13, D, ns=4))
 
     snap = eng.snapshot(led, tracking=True, status="", error=False, rois=(None, None))
 
     flags = {t["id"]: t["maybe_out"] for t in snap["teams"]}
-    assert flags == {25: True, 9: False, 7: False}
-    assert (snap["teams_left"], snap["teams_left_min"]) == (24, 23)
+    assert flags == {25: True, 13: True, 12: False, 9: False, 7: False}
+    unseen = {t["id"]: t["unseen"] for t in snap["teams"]}
+    assert unseen[25] == unseen[13] == "unsure" and unseen[12] == unseen[7] == "assumed"
+    assert snap["placed"] == 4  # a1, a2 (7) and the knocked d2 (12) and e1 (13); 9 is out
+    assert (snap["teams_left"], snap["teams_left_min"]) == (24, 22)
     # the per-team flags (Team.maybe_out) are exactly what Ledger.teams_left_min subtracts
     assert sum(flags.values()) == snap["teams_left"] - snap["teams_left_min"]
     led.apply(make_event("b3", 25, "a1", 7, K))  # a third member of 25 acts: alive after all
     snap = eng.snapshot(led, tracking=True, status="", error=False, rois=(None, None))
     assert not next(t for t in snap["teams"] if t["id"] == 25)["maybe_out"]
-    assert snap["teams_left_min"] == snap["teams_left"]
+    assert snap["teams_left_min"] == snap["teams_left"] - 1  # only 13 is still in doubt
+    led.observe_alive_count(AliveCount(3, 0, 0))  # fewer than the feed shows: missed deaths
+    hud = eng.snapshot(led, tracking=True, status="", error=False, rois=(None, None))
+    assert {t["id"]: t["unseen"] for t in hud["teams"]}[12] == "unsure"
+    assert (hud["teams_left_min"], hud["teams_left"]) == (1, 3)  # 3 people: 3 of the 4 standing at most
 
 
 def test_snapshot_start_teams_falls_back_to_the_confirmed_badge_count():
@@ -232,10 +249,10 @@ def test_a_finished_match_stays_on_the_board_until_the_next_one_starts():
     inbox.put(make_event("a1", 7, "b1", 25, D))
     sink.publish_match("ended")
     wait_for(lambda: snaps(out)[-1]["status"] == eng.MATCH_OVER)
-    assert len(snaps(out)[-1]["events"]) == 1
+    assert len(snaps(out)[-1]["events"]) == 1 and snaps(out)[-1]["match_over"]  # overlay hides
     sink.publish_match("new")
     wait_for(lambda: not snaps(out)[-1]["events"])
-    assert snaps(out)[-1]["status"] == FakeFeed.status
+    assert snaps(out)[-1]["status"] == FakeFeed.status and not snaps(out)[-1]["match_over"]
     for clear in (lambda: sink.publish_match("playing"),  # back after an alt-tab
                   lambda: inbox.put({"cmd": "tracking", "on": True})):  # capture restarted
         sink.publish_match("ended")

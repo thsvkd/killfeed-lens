@@ -197,3 +197,38 @@ def test_one_bad_frame_cannot_confirm_a_badge_and_lobby_leavers_widen_the_range(
     # 41 - wiped team 3 = 40; team 4 may be wiped; 2 of the 38 never-seen badges may be leavers.
     assert (duo.teams_left_min, duo.teams_left) == (37, 40)
     assert Ledger(teams=41).teams_left_min == 41  # a known start count needs no allowance
+
+
+def test_the_hud_count_bounds_teams_left_without_trusting_seen_alive_members():
+    from kfocr.domain.models import AliveCount
+
+    ledger = Ledger(squad_size=4, teams=25)
+    for team in (3, 4, 5):  # three wiped-looking teams: three dead, one slot never seen
+        squad_down(ledger, team, 3)
+    ledger.apply(ev("x1", 9, "y1", 8))  # 9 has someone standing; 8 only a dead member
+    ledger.apply(ev("z1", 11, "w1", 12, K))
+    assert (ledger.teams_left_min, ledger.teams_left) == (21, 25)  # no HUD: the old guess
+
+    ledger.observe_alive_count(AliveCount(5, 0, 0))
+    # at least 5 / 4 squads; the standing 7, 9, 11, 12 (a1, x1, z1, w1 knocked) take 4 of the 5
+    # players, and the fifth most likely fills one of their 12 empty slots (10 taken as filled)
+    assert (ledger.teams_left_min, ledger.teams_left) == (2, 4)
+    assert ledger.placed == 4 and ledger.unseen_unsure  # one player for 18 + 17 * 4 unseen slots
+
+    ledger.observe_alive_count(AliveCount(3, 0, 0))  # fewer than the feed shows standing:
+    assert (ledger.teams_left_min, ledger.teams_left) == (1, 3)  # missed deaths, HUD wins
+    ledger.observe_alive_count(AliveCount(90, 0, 0))
+    assert (ledger.teams_left_min, ledger.teams_left) == (23, 25)
+    assert not ledger.unseen_unsure  # room for nearly every unseen slot: assumed alive
+
+
+def test_ranked_puts_the_teams_the_board_knows_best_first():
+    ledger = Ledger(squad_size=4, teams=25)
+    ledger.apply(ev("a1", 7, "b1", 9))  # 7: one seen, 9: one dead
+    squad_down(ledger, 12, 2)
+    for name in ("c1", "c2", "c3", "c4"):  # 15: the whole squad seen, all standing
+        ledger.apply(ev(name, 15, "e1", 30, K))  # 30: one seen, knocked
+    ledger.apply(ev("d1", None, "b2", 9))  # unknown badge
+    squad_down(ledger, 20, 4)  # eliminated
+    # 7 and 30 have 3 unseen slots (7 has a kill); 9 and 12 may be wiped (2 unseen slots each)
+    assert [t.id for t in ledger.ranked()] == [15, 7, 30, 9, 12, None, 20]

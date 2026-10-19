@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -43,6 +44,7 @@ class Player:
     touched: float = 0.0  # time.monotonic() of the last change, for UI highlighting
     revived: float = 0.0  # time.monotonic() of the last comeback (revive/recall/AED/expiry)
     knocked_ns: int = 0
+    died_ns: int = 0  # feed time of the last death
     kills: int = 0  # credited to this player, so they follow it out of the unknown-badge bucket
     knocks: int = 0
 
@@ -57,6 +59,8 @@ class Team:
     kills: int = 0
     knocks: int = 0  # knocks dealt
     touched: float = 0.0
+    attacked: float = 0.0  # time.monotonic() of the last kill/knock it dealt (UI colours it)
+    hit: float = 0.0  # ... and of the last one it took
     last_ns: int = 0
 
     def _count(self, status: Status) -> int:
@@ -82,12 +86,19 @@ class Team:
 
     @property
     def maybe_out(self) -> bool:
-        """Every seen member is down but a full squad was never seen: the feed and HUD cannot tell
-        a wiped, underfilled team from one whose unseen member is alive. Narrowing this (e.g. one
-        unseen slot at most) dropped range coverage from 23/23 to 8/23 checkpoints on a squad match."""
-        return (self.id is not None and bool(self.players) and not self.eliminated
-                and len(self.players) < self.squad_size
-                and all(p.status is not Status.ALIVE for p in self.players.values()))
+        """Every seen member is down but a full squad was never seen: the feed cannot tell a wiped,
+        underfilled team from one whose unseen member is alive. A member knocked after the last
+        death seen rules it out: PUBG knocks a player only while a teammate still stands (the last
+        one standing dies at once), and comebacks (revive, AED) need one too; a death after the
+        knock may have been that teammate's. Narrowing this (e.g. one unseen slot at most)
+        dropped range coverage from 23/23 to 8/23 checkpoints on a squad match."""
+        players = self.players.values()
+        if (self.id is None or not self.players or self.eliminated
+                or len(self.players) >= self.squad_size
+                or any(p.status is Status.ALIVE for p in players)):
+            return False
+        last_death = max((p.died_ns for p in players if p.status is Status.DEAD), default=-1)
+        return not any(p.status is Status.KNOCKED and p.knocked_ns > last_death for p in players)
 
     @property
     def remaining(self) -> int:
@@ -240,6 +251,7 @@ class Ledger:
                         self._revive(killer, player, now)
                 friendly = killer_key is not None and killer_key == victim_key
                 if not friendly:
+                    killer.attacked = now
                     if kind in _CREDIT:
                         killer.kills += 1
                         if player:
@@ -251,7 +263,7 @@ class Ledger:
 
         if victim_name or victim_key is not None:
             victim = self._team(victim_key)
-            victim.touched, victim.last_ns = now, ns
+            victim.touched, victim.hit, victim.last_ns = now, now, ns
             name = victim_name or f"?{len(victim.players) + 1}"
             player = victim.players.setdefault(name, Player(name))
             if kind is EventType.KNOCK:
@@ -260,7 +272,7 @@ class Ledger:
                 if player.status is not Status.DEAD:  # a repeat knock restarts the bleed-out clock
                     player.status, player.touched, player.knocked_ns = Status.KNOCKED, now, ns
             elif kind in _LETHAL and player.status is not Status.DEAD:
-                player.status, player.touched = Status.DEAD, now
+                player.status, player.touched, player.died_ns = Status.DEAD, now, ns
             self._bleed_out(victim, now)
 
     @staticmethod
@@ -285,25 +297,61 @@ class Ledger:
 
     # --- views --------------------------------------------------------------------------
     def ranked(self) -> list[Team]:
-        """Alive teams first by remaining players, then kills; eliminated teams last."""
+        """Live teams first, the ones the board knows best on top (the overlay shows those
+        first): fewest never-seen slots, most remaining players, most kills; then the teams that
+        may be wiped and the unknown-badge bucket; eliminated teams last."""
         def key(t: Team):
-            return (t.eliminated, -t.remaining, -t.kills, t.id is None, t.id or 0)
+            return (t.eliminated, t.id is None, t.maybe_out, t.total - len(t.players),
+                    -t.remaining, -t.kills, t.id or 0)
         return sorted(self.teams.values(), key=key)
 
     def _known(self) -> list[Team]:
         return [t for t in self.teams.values() if t.id is not None]
 
     @property
+    def placed(self) -> int:
+        """Players the feed shows alive or knocked in badged teams still in. Some can be deaths the
+        reader missed: more of them than the HUD count proves that."""
+        return sum(p.status is not Status.DEAD for t in self._known() if not t.eliminated
+                   for p in t.players.values())
+
+    def _hud_floor(self) -> int:
+        return math.ceil(self.alive_count.count / self.squad_size) if self.alive_count else 0
+
+    @property
     def teams_left(self) -> int:
         known = self._known()
-        if self.team_count:
-            return max(0, max(self.team_count, len(known)) - sum(t.eliminated for t in known))
-        return sum(not t.eliminated for t in known)
+        if not self.team_count:
+            return sum(not t.eliminated for t in known)
+        left = max(0, max(self.team_count, len(known)) - sum(t.eliminated for t in known))
+        if self.alive_count is None:
+            return left
+        # A team nobody standing was seen in (may be wiped, never seen) is still in only if one of
+        # the HUD's players the board cannot place is in it, and those mostly fill the never-seen
+        # slots of the teams seen standing (their teammates): take 90% of those slots as filled.
+        # ponytail: a likelihood, not a bound. On 6 matches it kept the true count in range wherever
+        # the plain bound did, also on a perfect reading of the feed (taking all of them as filled
+        # undercut it once there), and narrowed the range (live 3: mean width 9.9 -> 5.8). Lower it
+        # if a match misses. A team known only by a killer's badge (name unread) stands too.
+        count, live = self.alive_count.count, [t for t in known if not t.eliminated]
+        standing = [t for t in live if not t.players
+                    or any(p.status is not Status.DEAD for p in t.players.values())]
+        others = len(live) - len(standing) + max(0, self.team_count - len(known))
+        filled = sum(t.total - len(t.players) for t in standing) * 9 // 10
+        rest = max(0, count - self.placed - filled)
+        return max(self._hud_floor(), min(count, len(standing) + min(others, rest)))  # <= left
 
     @property
     def teams_left_min(self) -> int:
-        """teams_left without the teams that may already be wiped (Team.maybe_out) and, while the
-        top badge stands in for the team count, the lobby leavers among never-seen badges."""
+        """With the HUD count: every team left has someone alive, so at least count / squad size.
+        Teams the feed shows standing do not raise it, some of them are deaths the reader missed
+        (live match 3: a floor from them was wrong at 17 of 22 checkpoints; given the true HUD
+        count, this one keeps the true teams left in range at 90-100% of checkpoints on 3 live and
+        3 recorded matches).
+        Without it: teams_left without the teams that may already be wiped (Team.maybe_out) and,
+        while the top badge stands in for the team count, the lobby leavers among never-seen badges."""
+        if self.alive_count is not None and self.team_count:
+            return self._hud_floor()
         leavers = 0
         if not self.start_teams:
             unseen = sum(b not in self._badge_seen for b in range(1, self.top_badge + 1))
@@ -320,6 +368,19 @@ class Ledger:
         # full unseen squads can add up past the lobby: cap at the lobby less the deaths seen.
         dead = sum(t.dead for t in self.teams.values())
         return max(0, min(sum(t.remaining for t in seen) + unseen, LOBBY_PLAYERS - dead))
+
+    @property
+    def unseen_unsure(self) -> bool:
+        """The HUD count leaves room for fewer than half of all never-seen squad slots to be alive
+        (lobbies run short teams, and the feed misses deaths), so they are drawn unsure instead of
+        assumed alive.
+        ponytail: one share for every team; per-team odds would need team sizes the feed never shows."""
+        if self.alive_count is None or not self.team_count:
+            return False
+        known = self._known()
+        slots = sum(t.total - len(t.players) for t in known if not t.eliminated)
+        slots += max(0, self.team_count - len(known)) * self.squad_size
+        return slots > 0 and self.alive_count.count - self.placed < slots / 2
 
     @property
     def knocked_now(self) -> int:

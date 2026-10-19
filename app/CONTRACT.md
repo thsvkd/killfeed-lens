@@ -32,22 +32,36 @@ changes every second would make the engine emit every second.
   "tracking": true,                           // false = capture stopped by the user
   "status": "캡처 중",                         // shown as is (capture health, ROI needed, paused...)
   "error": false,                             // true = status is an error (drawn as a warning)
+  "match_over": false,                        // true from "match ended" (HUD gone 45 s) until the
+                                              //   next match or a capture restart: overlay hides
   "players_left": 61, "teams_left": 18,       // Ledger.players_left / teams_left
-  "teams_left_min": 15,                       // Ledger.teams_left_min: the truth lies in [min, max]
+  "teams_left_min": 15,                       // Ledger.teams_left_min: the truth most likely lies
+                                              //   in [min, max] (with a HUD count the max is a
+                                              //   likelihood, not a bound)
   "start_teams": 25, "squad": 4,              // given start teams, else the highest confirmed badge
                                               //   (what teams_left counts down from); null = unknown
   "hud": {"count": 61, "at": 811900},         // last HUD alive count; null = never read
   "basis": "시작 25팀 x 4명 가정",              // Ledger.basis without the live age
   "kills": 34, "knocked": 3,                  // total_kills, knocked_now
   "last_at": 812100,                          // when the newest event was applied
-  "teams": [                                  // Ledger.ranked() order (the overlay relies on it)
+  "placed": 41,                               // Ledger.placed: players the feed shows alive or
+                                              //   knocked in badged teams still in (> hud.count:
+                                              //   the feed missed deaths)
+  "teams": [                                  // Ledger.ranked() order (the overlay relies on it):
+                                              //   fewest never-seen slots first, then maybe_out
+                                              //   teams, the "??" bucket, eliminated teams last
     {"id": 12,                                // badge; null = "??" bucket for unreadable badges
      "kills": 3, "knocks": 2,                 // kills credited, knocks dealt
      "out": false, "left": 3,                 // eliminated, remaining
-     "maybe_out": false,                      // every seen member down, fewer than a squad seen:
-                                              //   may be wiped (one of the teams min leaves out)
-     "slots": 4,                              // Team.total; UI pads players with assumed-alive slots
+     "maybe_out": false,                      // every seen member down and none knocked after the
+                                              //   last death seen (a knock means a teammate stands),
+                                              //   fewer than a squad seen: may be wiped
+     "slots": 4,                              // Team.total; UI pads players with never-seen slots
+     "unseen": "assumed",                     // how to draw them: "assumed" (alive) | "unsure" ("?":
+                                              //   maybe_out, or the HUD leaves room for fewer than
+                                              //   half of all never-seen slots, lobby-wide)
      "at": 812100,                            // Team.touched (change highlight)
+     "atk": 812100, "hit": 0,                 // last kill/knock it dealt / took (UI: blue / red)
      "players": [{"name": "SnowFox", "st": "alive", "at": 812100, "back": 0}]}
                                               // st: alive | knocked | dead; back: last comeback
   ],
@@ -64,16 +78,20 @@ changes every second would make the engine emit every second.
 }
 ```
 
-`teams_left_min` and `maybe_out` are additive in v1; a UI that does not know them shows the
-plain `teams_left`. The UI shows "min~max" while they differ, `0~left` remaining for a
-`maybe_out` team, and its never-seen slots as unsure (thin ring + "전멸 가능") instead of assumed
-alive. While `start_teams` is null, `teams_left` and (without `hud`) `players_left` count only
-the teams seen so far, so the UI shows "—" instead.
+`teams_left_min`, `maybe_out`, `unseen`, `atk`, `hit`, `placed` and `match_over` are additive in
+v1; a UI that does not know them shows the plain `teams_left` and draws never-seen slots by
+`maybe_out`. The UI shows "min~max" while they differ, `0~left` remaining for a `maybe_out` team
+(with "전멸 가능"), and never-seen slots as `unseen` says. With a HUD count the range comes from it
+(Ledger.teams_left_min: at least count / squad teams; teams_left: the teams seen standing plus as
+many others as the count's unplaced players can make, after they fill 90% of those teams'
+never-seen slots), not from the teams the feed shows standing alone, since some of those are deaths
+the reader missed. While `start_teams` is null, `teams_left` and (without `hud`)
+`players_left` count only the teams seen so far, so the UI shows "—" instead.
 
 What the UI derives by itself: players/teams labels (화면 / 추정 / 마지막 관측 after 5 s without a
 HUD reading), the HUD age, coarse "방금 / N초 전" labels, change highlights (4 s after `at`), the 2 px
 gauge (`players_left / (start_teams * squad)`), and whether the overlay has anything to show (any
-team, event or HUD reading, like `gui.overlay_has_content`).
+team, event or HUD reading, like `gui.overlay_has_content`, and not `match_over`).
 
 ## Commands (UI → engine)
 

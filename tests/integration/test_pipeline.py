@@ -354,6 +354,27 @@ def test_hud_count_back_after_a_long_absence_judges_a_new_match(tmp_path, back_s
     store.close()
 
 
+def test_one_misread_rise_after_an_absence_does_not_start_a_new_match(tmp_path):
+    from kfocr.pipeline import Pipeline
+
+    class Matches(Sink):
+        def __init__(self):
+            super().__init__()
+            self.states = []
+
+        def publish_match(self, state):
+            self.states.append(state)
+
+    config, sink = setup(tmp_path), Matches()
+    config.roi.rect = NormalizedRect(0, 0, 0.7, 1)
+    config.roi.alive_rect = NormalizedRect(0.8, 0, 0.2, 0.2)
+    text = HUDText({41: "", 42: "40", 43: "38", 44: "48"})  # 38 misread "48" for a second
+    source = Match([(0, 20, 1), (10, 10, 0), (60, 10, 0), (70, 10, 3), (71, 60, 2)])
+    Pipeline(config, source, recognizer=text, reader=text, icons=Icons(), sink=sink,
+             started_at_utc=datetime(2026, 10, 1, tzinfo=UTC)).run()
+    assert sink.states == ["ended", "playing"]
+
+
 def test_a_run_closed_in_the_lobby_ends_its_session_with_the_match(tmp_path):
     from kfocr.pipeline import Pipeline
 

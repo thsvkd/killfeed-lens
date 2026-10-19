@@ -215,9 +215,8 @@ class Pipeline:
         assembler, parser = RowAssembler(), EventParser()
         # The window must span the evidence reads even when a slow loop stretches them apart.
         evidence = self.config.tracker.evidence_frames
-        alive_reader = AliveCountReader(self.config.confidence.confirmed_min, evidence,
-                                       max(self.config.tracker.evidence_window_ms,
-                                           2 * ALIVE_INTERVAL_MS * max(1, evidence - 1)))
+        alive_reader = AliveCountReader(evidence_frames=evidence, evidence_window_ms=max(
+            self.config.tracker.evidence_window_ms, 2 * ALIVE_INTERVAL_MS * max(1, evidence - 1)))
         session = None
         frames = None
         last_infer_ns: int | None = None
@@ -236,6 +235,7 @@ class Pipeline:
         hud_ns: int | None = None
         last_count: int | None = None
         away = False
+        back_count: int | None = None  # the first sure count after an absence, until a second agrees
         commit = _git_commit()
         match_over = False  # "ended" published for the current absence
         ended_ns: int | None = None  # set: the next frame closes the session as of this time
@@ -384,15 +384,19 @@ class Pipeline:
                                 gone >= MATCH_ENDED_NS):
                             match_over = True
                             publish_match("ended")
-                        if reading is not None and away:  # judged on a sure count
+                        # Judged on two sure counts in a row: the HUD bar is low (vision.alive),
+                        # and one misread rise would reset the board mid-match.
+                        if reading is not None and away and reading.count != back_count:
+                            back_count = reading.count
+                        elif reading is not None and away:
                             if gone >= NEW_MATCH_AWAY_NS or last_count is None or (
                                     reading.count >= last_count + NEW_MATCH_RISE):
                                 ended_ns = hud_ns
                                 publish_match("new")
                             else:
                                 publish_match("playing")
-                            away, hud_ns, match_over = False, end_ns, False
-                        if reading is not None:
+                            away, hud_ns, match_over, back_count = False, end_ns, False, None
+                        if reading is not None and not away:
                             last_count = reading.count
                             if ended_ns is None:  # else it is the next match's count already
                                 session.metadata.setdefault("first_observed_alive", reading.count)
