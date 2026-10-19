@@ -14,6 +14,7 @@ from kfocr.domain.models import EventType
 # later match disagrees.
 KNOCK_FEED_RANGE_CM = 100_000
 _POSITION_MAX_AGE_SECONDS = 30  # positions are logged every ~10 s and stop at death
+Track = list[tuple[datetime, float, float]]
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,7 @@ def map_telemetry(
     events: list[dict[str, Any]], viewer: str | None = None
 ) -> list[TelemetryCanonicalEvent]:
     """With a viewer, knocks out of that viewer's killfeed range are left out."""
-    tracks = _team_tracks(events, viewer) if viewer else []
+    tracks = _feed_tracks(events, viewer) if viewer else []
     canonical: list[TelemetryCanonicalEvent] = []
     for raw_index, event in enumerate(events):
         raw_type = event.get("_T")
@@ -85,32 +86,57 @@ def map_telemetry(
     return canonical
 
 
-def _team_tracks(
+def _feed_tracks(
     events: list[dict[str, Any]], viewer: str
-) -> list[list[tuple[datetime, float, float]]]:
-    """Position samples of each member of the viewer's team; empty if the viewer is unknown."""
-    positions = [(event, event.get("character")) for event in events
-                 if event.get("_T") == "LogPlayerPosition"]
-    team = next((character.get("teamId") for _, character in positions
-                 if isinstance(character, dict) and character.get("name") == viewer), None)
-    if team is None:
-        return []
-    tracks: dict[str, list[tuple[datetime, float, float]]] = defaultdict(list)
-    for event, character in positions:
-        if not isinstance(character, dict) or character.get("teamId") != team:
+) -> list[tuple[datetime | None, list[Track]]]:
+    """From when on whose position samples decide the viewer's feed range: the viewer's team, then,
+    once it is wiped, the team of the player the spectator camera follows, which is the killer of
+    the one it followed before (live match 3, a solo-queued player dead after 90 s: knock FP
+    34 -> 2, FN 2 -> 5). Empty if the viewer is unknown."""
+    tracks: dict[Any, dict[str, Track]] = defaultdict(lambda: defaultdict(list))
+    team_of: dict[str, Any] = {}
+    died: dict[str, datetime] = {}
+    killer_of: dict[str, str | None] = {}
+    for event in events:
+        victim = _character_name(event.get("victim"))
+        if (event.get("_T") == "LogPlayerKillV2" and victim
+                and (when := _parse_timestamp(event.get("_D"))) is not None):
+            died[victim] = when
+            killer_of[victim] = (_character_name(event.get("killer"))
+                                 or _character_name(event.get("finisher")))
+        character = event.get("character")
+        if event.get("_T") == "LogPlayerCreate" and (name := _character_name(character)):
+            died.pop(name, None)  # recalled (Blue Chip): alive again
+        if event.get("_T") != "LogPlayerPosition" or not isinstance(character, dict):
             continue
+        name = str(character.get("name"))
+        team_of[name] = character.get("teamId")
         at, point = _parse_timestamp(event.get("_D")), _point(character)
         if at is not None and point is not None:
-            tracks[str(character.get("name"))].append((at, *point))
-    return list(tracks.values())
+            tracks[team_of[name]][name].append((at, *point))
+    if viewer not in team_of:
+        return []
+    segments: list[tuple[datetime | None, Any]] = [(None, team_of[viewer])]
+    members = [name for name, team in team_of.items() if team == team_of[viewer]]
+    if all(name in died for name in members):  # wiped: the camera follows the killers
+        followed = max(members, key=died.__getitem__)
+        since = died[followed]
+        while (killer := killer_of.get(followed)) is not None and killer in team_of and (
+                killer not in died or died[killer] > since):
+            segments.append((since, team_of[killer]))
+            if killer not in died:
+                break
+            followed, since = killer, died[killer]
+    return [(start, list(tracks[team].values())) for start, team in segments]
 
 
 def _in_feed_range(
-    tracks: list[list[tuple[datetime, float, float]]], at: datetime, victim: object
+    segments: list[tuple[datetime | None, list[Track]]], at: datetime, victim: object
 ) -> bool:
     point = _point(victim)
     if point is None:
         return True  # unknown location: keep the knock rather than hide a possible miss
+    tracks = next(tracks for start, tracks in reversed(segments) if start is None or start <= at)
     for track in tracks:
         sample_at, x, y = min(track, key=lambda sample: abs((sample[0] - at).total_seconds()))
         if (abs((sample_at - at).total_seconds()) <= _POSITION_MAX_AGE_SECONDS

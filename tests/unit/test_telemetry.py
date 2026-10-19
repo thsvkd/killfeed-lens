@@ -268,6 +268,37 @@ def test_map_telemetry_drops_knocks_out_of_the_viewers_feed_range():
     assert len(map_telemetry(events, viewer="Unknown")) == 4
 
 
+def test_after_the_viewers_team_is_wiped_the_feed_range_follows_the_killers():
+    def at(name: str, team: int, x: float) -> dict:
+        return {"name": name, "teamId": team, "location": {"x": x, "y": 0.0}}
+
+    def position(second: int, name: str, team: int, x: float) -> dict:
+        return {"_T": "LogPlayerPosition", "_D": f"2026-10-06T12:00:{second:02d}Z",
+                "character": at(name, team, x)}
+
+    def knock(second: int, victim_x: float) -> dict:
+        return {"_T": "LogPlayerMakeGroggy", "_D": f"2026-10-06T12:00:{second:02d}Z",
+                "attacker": _character("A"), "victim": at(f"V{second}", 9, victim_x)}
+
+    def kill(second: int, victim: dict, killer: str) -> dict:
+        return {"_T": "LogPlayerKillV2", "_D": f"2026-10-06T12:00:{second:02d}Z", "victim": victim,
+                "killer": _character(killer), "dBNOMaker": None, "finisher": _character(killer)}
+
+    events = [
+        position(0, "Me", 1, 0.0), position(0, "K1", 2, 500_000.0), position(0, "K2", 3, 900_000.0),
+        knock(5, 50_000.0),  # near Me, Me alive
+        kill(10, at("Me", 1, 0.0), "K1"),  # a solo viewer's team is wiped: the camera follows K1
+        knock(15, 50_000.0),  # near where Me was: not on K1's screen
+        knock(16, 450_000.0),  # near K1
+        kill(20, at("K1", 2, 500_000.0), "K2"),  # then K1's killer
+        knock(25, 450_000.0),
+        knock(26, 850_000.0),
+    ]
+
+    assert [e.victim for e in map_telemetry(events, viewer="Me")
+            if e.event_type is EventType.KNOCK] == ["V5", "V16", "V26"]
+
+
 def test_team_state_report_scores_the_board_against_telemetry_by_player_names():
     from dataclasses import replace
 
@@ -290,12 +321,12 @@ def test_team_state_report_scores_the_board_against_telemetry_by_player_names():
     assert report["summary"] == {
         "checkpoints": 3, "team_checks": 6, "vs_truth": half, "vs_oracle": half,
         "oracle_vs_truth": {"dead": 1.0, "kills": 1.0, "eliminated": 1.0},
-        "teams_left_in_range": 0.0, "teams_left_unknown": 0,
+        "teams_left_in_range": 1.0, "teams_left_unknown": 0, "teams_left_mean_width": 1.0,
         "oracle_teams_left_in_range": 1.0}
     last = report["checkpoints"][-1]
-    # Teams up to the highest badge (7); badge 7 may be an underfilled wiped squad and two of the
-    # never-seen badges may be lobby leavers.
-    assert last["teams_left"] == [[4, 7], 1] and last["oracle_teams_left"] == [1, 1]
+    # The HUD shows 4 alive: Hunter (badge 5) and 3 the board cannot place. They mostly fill the 3
+    # slots of Hunter's team never seen (2 of them), so one more team (badge 7, never-seen 1-6) at most.
+    assert last["teams_left"] == [[1, 2], 1] and last["oracle_teams_left"] == [1, 1]
     assert last["mismatched_teams"] == [
         {"telemetry_team": 1, "board_badges": [7], "dead": [3, 4], "kills": [0, 0],
          "eliminated": [False, True], "oracle": [4, 0, True]},

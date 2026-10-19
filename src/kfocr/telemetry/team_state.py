@@ -11,7 +11,7 @@ from datetime import timedelta
 from difflib import SequenceMatcher
 from typing import Any
 
-from kfocr.domain.models import ConfirmedEvent, EventType, Session
+from kfocr.domain.models import AliveCount, ConfirmedEvent, EventType, Session
 from kfocr.domain.tracker import name_key
 from kfocr.telemetry.mapping import TelemetryCanonicalEvent, _parse_timestamp
 from kfocr.ui.teams import Ledger, Status, make_event
@@ -57,6 +57,13 @@ def team_state_report(session: Session, observed: list[ConfirmedEvent], raw: lis
         mapped = _map_board(board, team_of)
         teams_left = sum(any(status.get(n, Status.ALIVE) is not Status.DEAD for n in names)
                          for names in members.values())
+        # The app reads the HUD alive count too (live match 3: 1293 of 1295 confirmed readings
+        # were the true count), so both boards get the true count of the moment. The teams_left
+        # range is thus scored as with a perfect HUD reading; the no-HUD path is not scored.
+        hud = AliveCount(sum(status.get(n, Status.ALIVE) is not Status.DEAD
+                             for names in members.values() for n in names), 0, 0)
+        for ledger, _, _ in feeds:
+            ledger.observe_alive_count(hud)
         mismatched = []
         for team in sorted(seen):
             names = members[team]
@@ -78,6 +85,7 @@ def team_state_report(session: Session, observed: list[ConfirmedEvent], raw: lis
         shown = bool(board.team_count)
         checks.update(checkpoints=1, teams_left_shown=shown,
                       teams_left=shown and board.teams_left_min <= teams_left <= board.teams_left,
+                      teams_left_width=shown and board.teams_left - board.teams_left_min,
                       oracle_teams_left=oracle.teams_left_min <= teams_left <= oracle.teams_left)
         rows.append({"video_seconds": round(mark, 1),
                      "teams_left": [[board.teams_left_min, board.teams_left], teams_left],
@@ -102,6 +110,8 @@ def team_state_report(session: Session, observed: list[ConfirmedEvent], raw: lis
             "teams_left_in_range": (checks["teams_left"] / checks["teams_left_shown"]
                                     if checks["teams_left_shown"] else 0.0),
             "teams_left_unknown": checks["checkpoints"] - checks["teams_left_shown"],
+            "teams_left_mean_width": (checks["teams_left_width"] / checks["teams_left_shown"]
+                                      if checks["teams_left_shown"] else 0.0),
             "oracle_teams_left_in_range": share("oracle_teams_left"),
         },
         "board_lag_seconds": BOARD_LAG_SECONDS,

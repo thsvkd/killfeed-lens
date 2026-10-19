@@ -33,7 +33,8 @@ def format_report(report: dict[str, Any]) -> str:
         f"team state ({teams['checkpoints']} checkpoints, {teams['team_checks']} team checks): "
         f"vs truth {trio(teams['vs_truth'])} | vs perfect reading {trio(teams['vs_oracle'])} | "
         f"ceiling {trio(teams['oracle_vs_truth'])} | teams_left in range "
-        f"{_percent(teams['teams_left_in_range'])} (ceiling "
+        f"{_percent(teams['teams_left_in_range'])}, mean width "
+        f"{teams.get('teams_left_mean_width', 0):.1f} (ceiling "
         f"{_percent(teams['oracle_teams_left_in_range'])}; "
         f"{teams.get('teams_left_unknown', 0)} checkpoints shown as unknown)"
     ]
