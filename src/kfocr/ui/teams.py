@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from enum import StrEnum
+from itertools import combinations
 from uuid import UUID, uuid4
 
 from kfocr.domain.models import AliveCount, ConfirmedEvent, EventType
@@ -42,6 +44,13 @@ _FULL_SQUAD_MATCH = 0.6  # same results from 0.5 to 0.8 on live matches 3 and 4
 _LETHAL = {EventType.KILL, EventType.FINISH, EventType.BLEEDOUT, EventType.SUICIDE,
            EventType.ENVIRONMENT}
 _CREDIT = {EventType.KILL, EventType.FINISH}
+
+
+def _numbered(a: str, b: str) -> bool:
+    """Names only their digits tell apart ("Tiger3"/"Tiger4"): squads number their names, so these
+    are two players unless one is the other with a glued badge (tracker._same_player)."""
+    ka, kb = name_key(a), name_key(b)
+    return ka != kb and re.sub(r"\d", "", ka) == re.sub(r"\d", "", kb) and not same_teammate(a, b)
 
 
 class Status(StrEnum):
@@ -225,10 +234,59 @@ class Ledger:
             if len(name) < 4:
                 same = max((known for known in members if key in name_key(known)), key=close, default=None)
             if same is None and len(members) >= self.squad_size:
+                # No _numbered() guard here: a digit misread of a member outnumbers numbered
+                # strangers (the guard cost live match 4 0.6 points of alive).
                 best = max(members, key=close)
                 if close(best) >= _FULL_SQUAD_MATCH:
                     same = best
         return same or name
+
+    def _home(self, name: str | None, team: int | None) -> int | None:
+        """A name already on another badged team is that player under a misread badge: PUBG names
+        are unique (3 OBS recordings: 6 players read into a second team, the first badge right for
+        all 6)."""
+        known = self._team_of.get(name) if name and team is not None else None
+        home = self.teams.get(known) if known is not None and known != team else None
+        return known if home is not None and len(name_key(name)) >= 4 and name in home.players else team
+
+    def _squeeze(self, team: Team) -> None:
+        """A squad holds squad_size players. Past that, one of them is a member read twice before
+        the squad filled up (live match 4: a spelling one letter off, a 3-character part): a read
+        too short to be a name goes to the member most like it, else the closest pair at
+        _FULL_SQUAD_MATCH or more is one player, but never two names only their digits tell apart
+        (squads number their names, tracker._same_player). Strangers under a misread badge stay.
+        ponytail: a short read goes to the most alike member, often a guess; the team's dead count
+        is what it gets right. Leaving out members seen standing after it cost live match 4 2.7
+        points of dead."""
+        def close(a: str, b: str) -> float:
+            return SequenceMatcher(None, name_key(a), name_key(b)).ratio()
+
+        def last(p: Player) -> int:
+            return max(p.seen_ns, p.died_ns, p.knocked_ns)
+
+        while team.id is not None and len(team.players) > self.squad_size:
+            names = list(team.players)
+            short = [n for n in names if len(n) < 4]
+            if short:
+                gone = short[0]
+                keep = max((n for n in names if n != gone), key=lambda n: close(n, gone))
+            else:
+                best: tuple[float, str, str] | None = None
+                for a, b in combinations(names, 2):
+                    if not _numbered(a, b) and (best is None or close(a, b) > best[0]):
+                        longer, shorter = sorted((a, b), key=lambda n: -len(name_key(n)))
+                        best = (close(a, b), longer, shorter)
+                if best is None or best[0] < _FULL_SQUAD_MATCH:
+                    return
+                _, keep, gone = best
+            kept, dropped = team.players[keep], team.players.pop(gone)
+            if last(dropped) > last(kept):  # the latest read tells its state
+                if kept.status is Status.DEAD and dropped.status is not Status.DEAD:
+                    self.returned = max(0, self.returned - 1)  # back (recall), as apply() counts it
+                kept.status, kept.died_ns, kept.knocked_ns = dropped.status, dropped.died_ns, dropped.knocked_ns
+                kept.seen_ns, kept.sure = dropped.seen_ns, dropped.sure
+            kept.touched, kept.revived = max(kept.touched, dropped.touched), max(kept.revived, dropped.revived)
+            kept.kills, kept.knocks = kept.kills + dropped.kills, kept.knocks + dropped.knocks
 
     def _attach(self, name: str | None, team: int | None) -> int | None:
         """Resolve a player to a team, learning name->team and re-homing unknown-team players."""
@@ -280,10 +338,12 @@ class Ledger:
         if kind is EventType.UNKNOWN:
             return
         self._saw_badges(ns, event.killer_team, event.victim_team)
-        killer_name = self._resolve(event.killer_name, event.killer_team)
-        victim_name = self._resolve(event.victim_name, event.victim_team)
-        killer_key = self._attach(killer_name, event.killer_team)
-        victim_key = self._attach(victim_name, event.victim_team)
+        killer_team = self._home(event.killer_name, event.killer_team)
+        victim_team = self._home(event.victim_name, event.victim_team)
+        killer_name = self._resolve(event.killer_name, killer_team)
+        victim_name = self._resolve(event.victim_name, victim_team)
+        killer_key = self._attach(killer_name, killer_team)
+        victim_key = self._attach(victim_name, victim_team)
 
         if kind in _CREDIT or kind is EventType.KNOCK:
             if killer_name or killer_key is not None:
@@ -327,6 +387,9 @@ class Ledger:
                 self.returned = max(0, self.returned - 1)
                 player.died_ns = ns
             self._bleed_out(victim, now, ns)
+        for key in {killer_key, victim_key} - {None}:
+            if key in self.teams:
+                self._squeeze(self.teams[key])
 
     @staticmethod
     def _bleed_out(team: Team, now: float, ns: int) -> None:
@@ -341,8 +404,10 @@ class Ledger:
         self._saw_badges(event.observed_at_ns, event.killer_team, event.victim_team)
         for name, team in ((event.killer_name, event.killer_team), (event.victim_name, event.victim_team)):
             if team is not None:
+                team = self._home(name, team)
                 self._attach(self._resolve(name, team), team)
                 if (home := self.teams.get(team)) is not None:  # no empty card for a misread
+                    self._squeeze(home)
                     self._bleed_out(home, time.monotonic(), event.observed_at_ns)
         for i, shown in enumerate(self.recent):
             if shown.event_id == event.event_id:

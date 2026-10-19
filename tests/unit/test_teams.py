@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from itertools import count
 
 from kfocr.domain.models import EventType
@@ -133,6 +134,7 @@ def test_ocr_spelling_variants_join_one_player_but_numbered_squadmates_stay_apar
     assert ledger.teams[27].players["da_kyeongg"].status is Status.DEAD
     assert "da_kyeongg" not in ledger.teams[None].players
 
+
 def test_squad_size_follows_the_highest_confirmed_badge():
     duo = Ledger()
     duo.apply(ev("a1", 41, "b1", 3))
@@ -259,6 +261,53 @@ def test_a_short_read_goes_to_the_member_it_is_most_like():
     ledger.apply(ev("x1", 11, "Lex", 7))  # part of both names; far more of Lex9's
     assert ledger.teams[7].players["Lex9"].status is Status.DEAD
     assert ledger.teams[7].players["Alexander"].status is Status.ALIVE
+
+
+def test_a_known_name_read_under_another_badge_stays_on_its_team():
+    ledger = Ledger(squad_size=4, teams=25)
+    ledger.apply(ev("Bravo1", 7, "x1", 9))
+    ledger.apply(ev("Bravo1", 12, "y1", 9))  # badge misread: names are unique
+    assert ledger.teams[7].kills == 2 and 12 not in ledger.teams
+
+
+def test_a_squad_past_its_size_merges_a_member_read_twice():
+    ledger = Ledger(squad_size=4, teams=25)
+    ledger.apply(ev("Wolfe_", 7, "v1", 9))
+    ledger.apply(ev("Wolfa", 7, "v2", 9))  # one letter off, before the squad filled up
+    for name in ("Charlie", "Delta", "Echo"):
+        ledger.apply(ev(name, 7, "v" + name, 9))
+    team = ledger.teams[7]
+    assert sorted(team.players) == ["Charlie", "Delta", "Echo", "Wolfe_"] and team.players["Wolfe_"].kills == 2
+
+
+def test_a_squad_past_its_size_folds_a_read_too_short_to_be_a_name_into_a_member():
+    ledger = Ledger(squad_size=4, teams=25)
+    for name in ("Alpha", "Bravo", "Charlie"):
+        ledger.apply(ev(name, 7, "v" + name, 9))
+    ledger.apply(ev("x1", 11, "Xq", 7))  # a garbled 2-character read of a member dying
+    ledger.apply(ev("Delta", 7, "w1", 9))
+    team = ledger.teams[7]
+    assert len(team.players) == 4 and "Xq" not in team.players and team.dead == 1
+
+
+def test_a_squad_past_its_size_keeps_numbered_squadmates_apart():
+    ledger = Ledger(squad_size=4, teams=25)
+    for name in ("Tiger1", "Tiger2", "Tiger3", "Tiger4"):
+        ledger.apply(ev(name, 7, "v" + name, 9))
+    ledger.apply(ev("x1", 11, "Tiger3", 7))
+    ledger.apply(ev("Zulu-Wolf", 7, "w1", 9))  # someone else under a misread badge
+    assert sorted(ledger.teams[7].players) == ["Tiger1", "Tiger2", "Tiger3", "Tiger4", "Zulu-Wolf"]
+
+
+def test_a_late_badge_does_not_move_a_known_player_to_a_team_never_shown():
+    ledger = Ledger(squad_size=4, teams=25)
+    ledger.apply(ev("ace1", 7, "v1", 9))
+    late = ev("ace1", None, "v2", 9)
+    ledger.apply(late)
+    ledger.amend(replace(late, killer_team=17))  # its badge read late, and misread
+    ledger.apply(ev("ace1", 7, "v3", 9))  # used to raise KeyError
+    assert ledger.teams[7].kills == 3 and 17 not in ledger.teams
+
 
 def test_recalled_players_hold_their_share_of_the_hud_count_until_the_feed_shows_them():
     from kfocr.domain.models import AliveCount
