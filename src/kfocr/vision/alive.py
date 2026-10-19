@@ -20,7 +20,10 @@ CONFIDENCE_MIN = 0.7
 # minute of the last count a misread cannot become the reference the next counts are judged by.
 # The next match comes minutes later.
 _STEP_MAX, _STEP_PER_S = 8, 0.5
-_FRESH_NS = 60_000_000_000  # the last count stays the reference this long
+# The last count stays the reference this long. pipeline.py judges match boundaries on the counts
+# let through here (gone MATCH_ENDED_NS, back NEW_MATCH_RISE higher): a next match within this of
+# the last count is judged once it expires (test_a_new_match_after_a_short_gap_is_judged_late).
+_FRESH_NS = 60_000_000_000
 
 
 def _lost_digit(short: int, long: int) -> bool:

@@ -90,8 +90,11 @@ the reader missed. While `start_teams` is null, `teams_left` and (without `hud`)
 
 What the UI derives by itself: players/teams labels (화면 / 추정 / 마지막 관측 after 5 s without a
 HUD reading), the HUD age, coarse "방금 / N초 전" labels, change highlights (4 s after `at`), the 2 px
-gauge (`players_left / (start_teams * squad)`), and whether the overlay has anything to show (any
-team, event or HUD reading, like `gui.overlay_has_content`, and not `match_over`).
+gauge (`players_left / (start_teams * squad)`), whether the overlay has anything to show (any
+team, event or HUD reading, like `gui.overlay_has_content`, and not `match_over`), the highlight
+colour (blue when `atk` is the newest change, red for `hit`, yellow otherwise), the board's sort
+and filter (kept per viewer), and its feed-confirmed / missed-death note (`placed` vs a fresh
+`hud.count`). The legacy Tk app (`kfocr gui`) does not follow `match_over` or `unseen`.
 
 ## Commands (UI → engine)
 

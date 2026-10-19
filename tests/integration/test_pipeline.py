@@ -375,6 +375,32 @@ def test_one_misread_rise_after_an_absence_does_not_start_a_new_match(tmp_path):
     assert sink.states == ["ended", "playing"]
 
 
+def test_a_new_match_after_a_short_gap_is_judged_late(tmp_path):
+    from kfocr.pipeline import Pipeline
+
+    class Matches(Sink):
+        def __init__(self):
+            super().__init__()
+            self.states = []
+
+        def publish_match(self, state):
+            self.states.append(state)
+
+    start = datetime(2026, 10, 1, tzinfo=UTC)
+    config, sink = setup(tmp_path), Matches()
+    config.roi.rect = NormalizedRect(0, 0, 0.7, 1)
+    config.roi.alive_rect = NormalizedRect(0.8, 0, 0.2, 0.2)
+    text = HUDText({41: "", 42: "40", 43: "95"})
+    # 40 alive, gone 48 s (ended), then a new match at 95: a rise the HUD reader holds back until
+    # its last count (40 at 1.5 s) is a minute old, so the new match opens at about 62 s, not 50 s
+    source = Match([(0, 20, 1), (10, 10, 0), (47, 10, 0), (50, 200, 2)])
+    last = Pipeline(config, source, recognizer=text, reader=text, icons=Icons(), sink=sink,
+                    started_at_utc=start).run()
+    assert sink.states == ["ended", "new"]
+    assert last.metadata["first_observed_alive"] == 95
+    assert 60 <= (last.started_at_utc - start).total_seconds() <= 63
+
+
 def test_a_run_closed_in_the_lobby_ends_its_session_with_the_match(tmp_path):
     from kfocr.pipeline import Pipeline
 

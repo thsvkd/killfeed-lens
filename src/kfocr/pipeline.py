@@ -38,7 +38,9 @@ ALIVE_INTERVAL_MS = 500  # the HUD count changes slowly; keep its OCR (~25 ms) o
 # island. Gone this long, the match is over for this player.
 MATCH_ENDED_NS = 45_000_000_000
 # Back from such a gap, it is a new match if the count rose by more than a recall brings back,
-# or if no mid-match alt-tab lasts that long.
+# or if no mid-match alt-tab lasts that long. The counts come through vision.alive's plausibility
+# check, which holds back a big rise for its _FRESH_NS (60 s) after the last count: lobbies last
+# longer than that, so a next match is still caught, just not before then.
 # ponytail: from two recordings; an alt-tab past 3 min splits a match, and requeueing within 3 min
 # after dying at about the next lobby's size merges two. Retune with recorded lobbies.
 NEW_MATCH_RISE = 4
