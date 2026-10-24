@@ -258,7 +258,10 @@ class TemporalTracker:
             # merely similar victim is a different row ("Kilo-0870"/"Milo-0870" killed
             # together); an identical one is the same kill shown twice. With the same killer, type
             # and victim badge, a victim read only in part or with a glued character is that kill
-            # again too (a row re-read while it scrolls down: 5 of 6 false events on a squad replay).
+            # again too (a row re-read while it scrolls down: 5 of 6 false events on a squad replay),
+            # also when the cut row lost its victim badge (live: 6 of 6 such re-reads), or when the
+            # cut, unbadged read came first (spectating, the newest row: 4 of 6 false events in a
+            # match); one known badge is enough, two must agree.
             self._recent = [
                 item for item in self._recent if observed_at_ns - item[0] <= _DUPLICATE_WINDOW_NS
             ]
@@ -271,8 +274,7 @@ class TemporalTracker:
                     for row in rows))
                 and (_same_player(victim, candidate.victim_name) or (
                     other.confirmed is not None and kind is candidate.event_type
-                    and other.confirmed.victim_team is not None
-                    and other.confirmed.victim_team == victim_team
+                    and len({victim_team, other.confirmed.victim_team} - {None}) == 1
                     and _same_player(other.confirmed.killer_name, candidate.killer_name)
                     and _reread(victim, candidate.victim_name)))), None)
             if repeated is not None:

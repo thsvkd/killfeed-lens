@@ -217,6 +217,28 @@ def test_a_scrolled_row_reread_in_part_is_the_same_kill_but_a_squadmate_is_not()
     assert len(tracker.update([event(12, 40, **mate)], 1_200_000_000)) == 1
 
 
+def test_a_scrolled_row_reread_in_part_without_its_victim_badge_is_the_same_kill() -> None:
+    tracker = TemporalTracker(session_id=uuid4())
+    badged = dict(killer_team=3, victim_team=8, victim_name="Bravo-Six")
+    assert tracker.update([event(1, **badged)], 100_000_000) == []
+    assert len(tracker.update([event(2, **badged)], 200_000_000)) == 1
+    # Cut mid-move, the row lost its victim badge too (live: all 6 such duplicates).
+    part = dict(badged, victim_name="Bra", victim_team=None, visual_fingerprint="moved")
+    assert [e for f in range(5, 15) for e in tracker.update([event(f, 40, **part)], f * 100_000_000)] == []
+
+
+def test_a_row_read_cut_and_unbadged_first_then_whole_is_one_kill_with_its_badge() -> None:
+    # Spectating, the newest row read cut and unbadged until it scrolled down a row (live: 4 of
+    # 6 false events in a match).
+    tracker = TemporalTracker(session_id=uuid4())
+    cut = dict(killer_team=3, victim_name="Bra", visual_fingerprint="top")
+    out = [e for f in range(1, 7) for e in tracker.update([event(f, **cut)], f * 100_000_000)]
+    assert len(out) == 1 and out[0].victim_team is None
+    whole = dict(killer_team=3, victim_name="Bravo-Six", victim_team=8, visual_fingerprint="below")
+    assert [e for f in range(10, 14) for e in tracker.update([event(f, 40, **whole)], f * 100_000_000)] == []
+    assert [(e.event_id, e.victim_team) for e in tracker.take_amended()] == [(out[0].event_id, 8)]
+
+
 def test_a_victim_badge_read_after_the_row_emitted_fills_the_event_in() -> None:
     tracker = TemporalTracker(session_id=uuid4())
     unread = dict(killer_team=3, visual_fingerprint="row")
