@@ -44,7 +44,7 @@ body {
 .sprite { position: absolute; overflow: hidden; }
 
 .g { width: 1em; height: 1em; flex: none; display: block; }
-.g-alive, .g-assumed { color: var(--alive); }
+.g-alive, .g-estimated, .g-assumed { color: var(--alive); }
 .g-unsure { color: var(--dim); }
 .g-knocked { color: var(--knock); }
 .g-dead { color: var(--red); }
@@ -70,10 +70,8 @@ body {
 .side-atk { color: var(--atk); }
 .side-vic { color: var(--red); }
 
-/* Change highlight: lit at once, then KF.heat steps --fade down to 0 on timers. No CSS transitions:
-   hardware acceleration is off and a game runs next to us, and a running transition, even a
-   stepped one, makes Chromium produce a frame at every vsync. `atk` / `hit` / `loss` only recolour
-   it (blue / red; yellow otherwise). */
+/* KF.heat animates only this layer's opacity over the final 900 ms, then removes the animation.
+   atk / hit / loss set blue / red; yellow otherwise. */
 .hot-able { --hot-c: var(--hot); --hot-rgb: 240, 228, 66; }
 .hot-able.atk { --hot-c: var(--atk); --hot-rgb: 86, 180, 233; }
 .hot-able.hit, .hot-able.loss { --hot-c: var(--red); --hot-rgb: 255, 90, 74; }
@@ -83,7 +81,7 @@ body {
   pointer-events: none;
   opacity: 0;
 }
-.hot-able.hot::before { opacity: var(--fade, 1); }
+.hot-able.hot::before { opacity: 1; }
 
 .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 

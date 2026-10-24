@@ -30,7 +30,7 @@
       KF.heat(li, team.at);
     }
     const slots = KF.slots(team);
-    const sig = slots.map((s) => `${s.kind}${s.at}/${s.back}`).join();
+    const sig = slots.map((s) => `${s.kind}${s.at}/${s.back}`).join() + Boolean(team.maybe_out);
     if (li.dataset.sig === sig) return;
     li.dataset.sig = sig;
     const pips = li.querySelector('.pips');

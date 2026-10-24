@@ -62,11 +62,19 @@ changes every second would make the engine emit every second.
      "unseen": "assumed",                     // older UIs: all of them "assumed" | "unsure"
      "at": 812100,                            // Team.touched (change highlight)
      "atk": 812100, "hit": 0,                 // last kill/knock it dealt / took (UI: blue / red)
-     "players": [{"name": "SnowFox", "st": "alive", "at": 812100, "back": 0}]}
+     "players": [{"name": "SnowFox", "st": "alive", "at": 812100, "back": 0,
+                  "sure": true, "downs": 0, "knock_seconds": 90}]}
                                               // st: alive | knocked | dead | unsure (Ledger.draw:
                                               //   the HUD count, which counts knocked players, has
                                               //   no room for it; a missed death or bleed-out);
-                                              //   back: last comeback
+                                              //   back: last observed comeback (not expiry)
+                                              //   sure: false after a knock expires without a death
+                                              //   downs: observed knocks taken this life; recall resets,
+                                              //     ordinary revive keeps it (earlier knocks may be missed)
+                                              //   knock_seconds: per-stack inference threshold:
+                                              //     90,30,30,10,7,5,4,3,2 (9+); based on update 15.2.
+                                              //     NOT a death bound: update 23.2 changed stationary
+                                              //     bleeding; the feed does not expose movement.
   ],
   "events": [                                 // newest first, at most 20 (Ledger.recent)
     {"kind": "kill",                          // EventType value

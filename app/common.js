@@ -1,7 +1,8 @@
 'use strict';
 // Shared by the board and the overlay: glyph sprite, labels, the engine clock, change highlights.
 // Shape always carries the meaning, colour only repeats it:
-// alive = filled circle, assumed (squad slot never seen) = dashed ring, knocked = diamond,
+// alive = filled circle, estimated (knock timed out without a death row) = half-filled circle,
+// assumed (squad slot never seen) = dashed ring, knocked = diamond,
 // dead = red cross, unsure (never-seen slot that may not be alive: its team may be wiped, next to
 // the words "전멸 가능", or the HUD count leaves room for fewer than half of them) = question
 // mark. A comeback is a plain alive glyph, only lit for a moment.
@@ -9,7 +10,6 @@
 const KF = (() => {
   const HOLD = 4000; // ms a change stays highlighted (Tk FLASH_S)
   const FADE = 900; // ms the highlight fades out, ending at HOLD
-  const STEPS = 6; // ... in this many steps (KF.heat)
   // Fixed per team NUMBER in the game (medians of real badge crops); 26-50 are darker than 1-25.
   // 11, 12, 14 and 23 are 3-13% darker than measured so the white digits keep 4.5:1.
   const TEAM_COLORS = [null,
@@ -20,10 +20,11 @@ const KF = (() => {
     '#414F62', '#0A403E', '#442E0D', '#44561C', '#503A5B', '#366153', '#505F6E', '#725448', '#343055', '#565412'];
   const VERB = { kill: '처치', knock: '기절', finish: '마무리', bleedout: '출혈사',
                  suicide: '자살', environment: '환경사', unknown: '?' };
-  const STATUS = { alive: '생존', knocked: '기절', dead: '사망', assumed: '미확인', unsure: '생존 불명' };
+  const STATUS = { alive: '생존', estimated: '생존 추정', knocked: '기절', dead: '사망', assumed: '미확인', unsure: '생존 불명' };
 
   const SPRITE = `<svg class="sprite" width="0" height="0" aria-hidden="true">
     <symbol id="g-alive" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="currentColor"/></symbol>
+    <symbol id="g-estimated" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8 2.4a5.6 5.6 0 0 0 0 11.2Z" fill="currentColor"/></symbol>
     <symbol id="g-assumed" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-dasharray="2.6 2.1"/></symbol>
     <symbol id="g-unsure" viewBox="0 0 16 16"><path d="M5.5 6.1C5.5 4.5 6.6 3.4 8.1 3.4s2.5 1 2.5 2.4c0 1.9-2.5 2.1-2.5 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="8.1" cy="12.6" r="1.15" fill="currentColor"/></symbol>
     <symbol id="g-knocked" viewBox="0 0 16 16"><path d="M8 .9 15.1 8 8 15.1.9 8Z" fill="currentColor"/></symbol>
@@ -100,22 +101,28 @@ const KF = (() => {
     el.style.transform = `scaleX(${total ? Math.min(1, snap.players_left / total) : 0})`;
   }
 
-  /** Light `el` (class 'hot') until HOLD ms after `at`, fading out over the last FADE ms in
-   *  STEPS timer steps: one repaint each and nothing in between or while idle (a CSS transition,
-   *  even a stepped one, ticks every frame: 2x the overlay's CPU in the demo). A node rebuilt
-   *  mid-fade starts at the step it is due, so it never flashes back to full. */
+  /** Continuous fade only during the final FADE ms. A delayed animation holds without repainting;
+   *  on completion it is removed. Rebuilt nodes start at the event's current age. */
   function heat(el, at) {
-    for (const t of el._heat ?? []) clearTimeout(t);
-    el._heat = [];
+    if (el._heatAt === at) return;
+    el._heatAt = at;
+    el._heat?.cancel();
+    el._heat = null;
     const left = at ? at + HOLD - now() : 0;
-    const step = (i) => { // i steps into the fade; STEPS = out
-      el.classList.toggle('hot', i < STEPS);
-      if (i < STEPS) el.style.setProperty('--fade', String(1 - i / STEPS));
+    el.classList.toggle('hot', left > 0);
+    if (left <= 0) return;
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const animation = el.animate([{ opacity: 1 }, { opacity: 0 }], {
+      pseudoElement: '::before', duration: reduce ? 0 : FADE,
+      delay: left - (reduce ? 0 : FADE), easing: 'linear', fill: 'both',
+    });
+    animation.startTime = document.timeline.currentTime;
+    el._heat = animation;
+    animation.onfinish = () => {
+      el.classList.remove('hot');
+      animation.cancel();
+      el._heat = null;
     };
-    const start = left - FADE; // ms until the fade starts
-    const done = left <= 0 ? STEPS : Math.max(0, Math.floor(-start / (FADE / STEPS)));
-    step(done);
-    for (let i = done + 1; i <= STEPS; i++) el._heat.push(setTimeout(() => step(i), start + (i * FADE) / STEPS));
   }
 
   /** Colour of a team's highlight: blue when its latest change was dealing a kill or knock, red when
@@ -138,7 +145,7 @@ const KF = (() => {
    *  engines send only `team.unseen` for all of them. Players come as drawn: alive, knocked, dead,
    *  or unsure (the HUD count has no room for them). */
   function slots(team) {
-    const seen = team.players.map((p) => ({ ...p, kind: p.st }));
+    const seen = team.players.map((p) => ({ ...p, kind: p.st === 'alive' && p.sure === false ? 'estimated' : p.st }));
     const pad = Math.max(0, team.slots - seen.length);
     const assumed = team.assumed ?? (unseen(team) === 'assumed' ? pad : 0);
     return seen.concat(Array.from({ length: pad }, (_, i) => (

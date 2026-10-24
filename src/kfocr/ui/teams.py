@@ -14,11 +14,14 @@ from kfocr.domain.models import AliveCount, ConfirmedEvent, EventType
 from kfocr.domain.tracker import name_key, same_teammate
 
 SQUAD_SIZE = 4
-# A knocked player either dies (feed shows it) or is revived (the feed never shows that). PUBG's
-# exact bleed-out time is not documented (pubg.wiki.gg/wiki/DBNO only says it drains and speeds up
-# with repeated knocks), so use a conservative bound.
-# ponytail: a death the OCR missed shows as alive after this; make it per-knock-count if measured.
-KNOCK_TIMEOUT_NS = 90 * 1_000_000_000
+# Per-life inference thresholds based on PUBG update 15.2 (pubg.com/en/news/1725).
+# Update 23.2 changed stationary bleeding (pubg.com/en/news/6292); the feed cannot see movement.
+# These are not guaranteed death times. No death row means an unconfirmed survival estimate.
+KNOCK_SECONDS = (90, 30, 30, 10, 7, 5, 4, 3, 2)
+KNOCK_TIMEOUT_NS = KNOCK_SECONDS[0] * 1_000_000_000
+# Near-simultaneous sightings of a still-downed player are one knock, not another stack.
+# Keep this short: a real revive and another knock can occur while the first row is on screen.
+_KNOCK_DUPLICATE_NS = 3 * 1_000_000_000
 # Badges number the teams 1..N in a lobby of about 100 players, so the highest badge seen tells
 # squads (~25 teams) from duos (~50) and solos. A badge counts once it was seen again at least a
 # second later: one bad frame misreads every row on it alike (38 -> 88 on two rows of one frame).
@@ -64,13 +67,18 @@ class Player:
     name: str
     status: Status = Status.ALIVE
     touched: float = 0.0  # time.monotonic() of the last change, for UI highlighting
-    revived: float = 0.0  # time.monotonic() of the last comeback (revive/recall/AED/expiry)
+    revived: float = 0.0  # time.monotonic() of the last observed comeback (not inferred expiry)
     knocked_ns: int = 0
+    downs: int = 0  # knocks taken in this life; ordinary revives keep this, recalls reset it
     died_ns: int = 0  # feed time of the last death
     seen_ns: int = 0  # feed time it was last shown standing (acting, or knocked)
     sure: bool = True  # False: a knock ran out with no news (most likely revived, maybe dead)
     kills: int = 0  # credited to this player, so they follow it out of the unknown-badge bucket
     knocks: int = 0
+
+    @property
+    def knock_seconds(self) -> int:
+        return KNOCK_SECONDS[min(max(self.downs, 1), len(KNOCK_SECONDS)) - 1]
 
 
 @dataclass
@@ -157,6 +165,7 @@ class Ledger:
         self.last_ns = 0
         self.last_at = 0.0  # time.monotonic() of the latest event, for UI highlighting
         self._team_of: dict[str, int] = {}
+        self._badge_conflicts: set[str] = set()
         self.alive_count: AliveCount | None = None
         self.alive_count_at = 0.0
         # Players the HUD count says came back (recall) that the board still has dead: until the
@@ -202,6 +211,8 @@ class Ledger:
                 self.squad_size = size
                 for team in self.teams.values():
                     team.squad_size = size
+                for team in list(self.teams.values()):
+                    self._squeeze(team)
 
     @property
     def team_count(self) -> int:
@@ -247,14 +258,18 @@ class Ledger:
         all 6)."""
         known = self._team_of.get(name) if name and team is not None else None
         home = self.teams.get(known) if known is not None and known != team else None
-        return known if home is not None and len(name_key(name)) >= 4 and name in home.players else team
+        if home is not None and len(name_key(name)) >= 4 and name in home.players:
+            self._badge_conflicts.add(name)
+            return known
+        return team
 
     def _squeeze(self, team: Team) -> None:
         """A squad holds squad_size players. Past that, one of them is a member read twice before
         the squad filled up (live match 4: a spelling one letter off, a 3-character part): a read
         too short to be a name goes to the member most like it, else the closest pair at
         _FULL_SQUAD_MATCH or more is one player, but never two names only their digits tell apart
-        (squads number their names, tracker._same_player). Strangers under a misread badge stay.
+        (squads number their names, tracker._same_player). Unrelated extra names are preserved in
+        the unassigned bucket; a member with conflicting badge evidence moves there first.
         ponytail: a short read goes to the most alike member, often a guess; the team's dead count
         is what it gets right. Leaving out members seen standing after it cost live match 4 2.7
         points of dead."""
@@ -277,14 +292,27 @@ class Ledger:
                         longer, shorter = sorted((a, b), key=lambda n: -len(name_key(n)))
                         best = (close(a, b), longer, shorter)
                 if best is None or best[0] < _FULL_SQUAD_MATCH:
-                    return
+                    gone = next((n for n in names if n in self._badge_conflicts), names[-1])
+                    moved = team.players.pop(gone)
+                    self._team_of.pop(gone, None)
+                    unknown = self._team(None)
+                    unknown.players[gone] = moved
+                    team.kills, team.knocks = team.kills - moved.kills, team.knocks - moved.knocks
+                    unknown.kills, unknown.knocks = unknown.kills + moved.kills, unknown.knocks + moved.knocks
+                    continue
                 _, keep, gone = best
             kept, dropped = team.players[keep], team.players.pop(gone)
+            same_life = kept.died_ns == dropped.died_ns
+            downs = max(kept.downs, dropped.downs) if same_life else dropped.downs
             if last(dropped) > last(kept):  # the latest read tells its state
                 if kept.status is Status.DEAD and dropped.status is not Status.DEAD:
                     self.returned = max(0, self.returned - 1)  # back (recall), as apply() counts it
                 kept.status, kept.died_ns, kept.knocked_ns = dropped.status, dropped.died_ns, dropped.knocked_ns
                 kept.seen_ns, kept.sure = dropped.seen_ns, dropped.sure
+                kept.downs = downs
+            elif same_life:
+                kept.downs = max(kept.downs, dropped.downs)  # aliases are not separate knocks
+            self._team_of.pop(gone, None)
             kept.touched, kept.revived = max(kept.touched, dropped.touched), max(kept.revived, dropped.revived)
             kept.kills, kept.knocks = kept.kills + dropped.kills, kept.knocks + dropped.knocks
 
@@ -308,18 +336,23 @@ class Ledger:
 
     # --- aggregation --------------------------------------------------------------------
     def _revive(self, team: Team, player: Player, now: float) -> None:
+        if player.status is Status.DEAD:
+            player.downs = 0
+            player.knocked_ns = 0
         player.status = Status.ALIVE
         player.touched = player.revived = team.touched = now
 
     def expire(self, now_ns: int, now: float) -> None:
-        """Knocked players with no death in KNOCK_TIMEOUT_NS were most likely revived (the feed never
+        """Knocked players with no death by their per-life threshold are estimated alive (the feed never
         shows revives; telemetry: revives take 13-99 s, median 28 s), but a death the reader missed
         looks the same: unconfirmed until the feed shows them again, they are the first drawn
         unsure when the HUD count has no room for everyone (draw())."""
         for team in self.teams.values():
             for player in team.players.values():
-                if player.status is Status.KNOCKED and now_ns - player.knocked_ns >= KNOCK_TIMEOUT_NS:
-                    self._revive(team, player, now)
+                if (player.status is Status.KNOCKED
+                        and now_ns - player.knocked_ns >= player.knock_seconds * 1_000_000_000):
+                    player.status = Status.ALIVE
+                    player.touched = team.touched = now
                     player.sure = False
 
     def tick(self, now: float) -> None:
@@ -328,12 +361,15 @@ class Ledger:
             self.expire(self.last_ns + int((now - self.last_at) * 1e9 * self.scale), now)
 
     def apply(self, event: ConfirmedEvent) -> None:
+        if any(e.event_id == event.event_id for e in self.recent):
+            return
         now = self.last_at = time.monotonic()
-        ns = self.last_ns = event.observed_at_ns
+        ns = event.observed_at_ns
+        self.last_ns = max(self.last_ns, ns)
         if self.first_ns is None:
             self.first_ns = ns
         self.recent.append(event)
-        self.expire(ns, now)
+        self.expire(self.last_ns, now)
         kind = event.event_type
         if kind is EventType.UNKNOWN:
             return
@@ -352,11 +388,18 @@ class Ledger:
                 player = None
                 if killer_name:
                     player = killer.players.setdefault(killer_name, Player(killer_name))
-                    if player.status is Status.DEAD:  # back (recall): one of the HUD's comebacks
-                        self.returned = max(0, self.returned - 1)
-                    if player.status is not Status.ALIVE:  # acting players are alive, however we got here
-                        self._revive(killer, player, now)
-                    player.seen_ns, player.sure = ns, True
+                    # A delayed finish/bleed-out still credits its dead or downed attacker. A
+                    # new knock is standing evidence; a HUD recall also permits a new-life kill.
+                    standing = kind is not EventType.FINISH and (
+                                player.status is Status.ALIVE or ns > player.died_ns
+                                and (kind is EventType.KNOCK or player.status is Status.DEAD
+                                     and self.returned > 0))
+                    if standing:
+                        if player.status is Status.DEAD:
+                            self.returned = max(0, self.returned - 1)
+                        if player.status is not Status.ALIVE:
+                            self._revive(killer, player, now)
+                        player.seen_ns, player.sure = ns, True
                 friendly = killer_key is not None and killer_key == victim_key
                 if not friendly:
                     killer.attacked = now
@@ -375,10 +418,14 @@ class Ledger:
             name = victim_name or f"?{len(victim.players) + 1}"
             player = victim.players.setdefault(name, Player(name))
             if kind is EventType.KNOCK:
-                if player.status is Status.DEAD:  # knocked again => it came back (recall/AED/revive)
+                if player.status is Status.DEAD and ns > player.died_ns:
                     self.returned = max(0, self.returned - 1)
                     self._revive(victim, player, now)
-                if player.status is not Status.DEAD:  # a repeat knock restarts the bleed-out clock
+                duplicate = (player.downs > 0 and ns <= player.knocked_ns
+                             or player.status is Status.KNOCKED
+                             and ns - player.knocked_ns < _KNOCK_DUPLICATE_NS)
+                if player.status is not Status.DEAD and not duplicate:
+                    player.downs += 1
                     player.status, player.touched, player.knocked_ns = Status.KNOCKED, now, ns
                     player.seen_ns, player.sure = ns, True
             elif kind in _LETHAL and player.status is not Status.DEAD:
@@ -386,10 +433,11 @@ class Ledger:
             elif kind in _LETHAL and ns - player.died_ns >= _DIED_AGAIN_NS:  # came back, died again
                 self.returned = max(0, self.returned - 1)
                 player.died_ns = ns
-            self._bleed_out(victim, now, ns)
+                player.downs = 0  # a second death belongs to another life
         for key in {killer_key, victim_key} - {None}:
             if key in self.teams:
                 self._squeeze(self.teams[key])
+                self._bleed_out(self.teams[key], now, ns)
 
     @staticmethod
     def _bleed_out(team: Team, now: float, ns: int) -> None:

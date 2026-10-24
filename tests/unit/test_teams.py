@@ -110,7 +110,7 @@ def test_unknown_team_uses_known_name_then_bucket_then_rehomes():
 
 
 def test_ocr_spelling_variants_join_one_player_but_numbered_squadmates_stay_apart():
-    ledger = Ledger()
+    ledger = Ledger(squad_size=4)
     ledger.apply(ev("LA11AL", 23, "x1", 5))
     ledger.apply(ev("pporidw", 18, "LA11ALLA", 23))   # trailing icon debris
     ledger.apply(ev("Zo-o7", 7, "y1", 6))
@@ -248,7 +248,8 @@ def test_a_full_squad_takes_a_close_misread_as_a_member_but_not_a_stranger():
         ledger.apply(ev(name, 7, "v" + name, 9, K))
     ledger.apply(ev("Charlle", 7, "w1", 9))  # one letter off a member of the full squad
     ledger.apply(ev("Zulu-Wolf", 7, "w2", 9))  # unlike any: someone else under a misread badge
-    assert sorted(ledger.teams[7].players) == ["Bravo", "Charlie", "Delta", "Echo", "Zulu-Wolf"]
+    assert sorted(ledger.teams[7].players) == ["Bravo", "Charlie", "Delta", "Echo"]
+    assert ledger.teams[None].players["Zulu-Wolf"].kills == 1
     assert ledger.teams[7].players["Charlie"].kills == 1
     ledger.apply(ev("x1", 11, "Br", 7))  # too short to be a PUBG name: part of a member's
     assert ledger.teams[7].players["Bravo"].status is Status.DEAD and "Br" not in ledger.teams[7].players
@@ -296,7 +297,122 @@ def test_a_squad_past_its_size_keeps_numbered_squadmates_apart():
         ledger.apply(ev(name, 7, "v" + name, 9))
     ledger.apply(ev("x1", 11, "Tiger3", 7))
     ledger.apply(ev("Zulu-Wolf", 7, "w1", 9))  # someone else under a misread badge
-    assert sorted(ledger.teams[7].players) == ["Tiger1", "Tiger2", "Tiger3", "Tiger4", "Zulu-Wolf"]
+    assert sorted(ledger.teams[7].players) == ["Tiger1", "Tiger2", "Tiger3", "Tiger4"]
+    assert "Zulu-Wolf" in ledger.teams[None].players
+
+
+def test_knock_stack_shortens_timeout_and_survives_a_normal_revive():
+    ledger = Ledger(squad_size=4)
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, K, ns=1_000_000_000))
+    player = ledger.teams[2].players["Bravo"]
+    assert player.downs == 1
+    ledger.expire(90_999_999_999, 1.0)
+    assert player.status is Status.KNOCKED
+    ledger.expire(91_000_000_000, 2.0)
+    assert player.status is Status.ALIVE and not player.sure and player.revived == 0
+    ledger.apply(ev("Bravo", 2, "Charlie", 3, K, ns=100_000_000_000))
+    assert player.sure and player.downs == 1
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, K, ns=110_000_000_000))
+    assert player.downs == 2
+    ledger.expire(139_999_999_999, 3.0)
+    assert player.status is Status.KNOCKED
+    ledger.expire(140_000_000_000, 4.0)
+    assert player.status is Status.ALIVE and not player.sure
+
+
+def test_repeat_knock_after_an_unseen_revive_counts_but_duplicate_rows_do_not():
+    ledger = Ledger(squad_size=4)
+    event = ev("Alpha", 1, "Bravo", 2, K, ns=1_000_000_000)
+    ledger.apply(event)
+    ledger.apply(event)
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, K, ns=3_000_000_000))
+    player = ledger.teams[2].players["Bravo"]
+    assert player.downs == 1 and player.knocked_ns == 1_000_000_000
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, K, ns=26_000_000_000))
+    assert player.downs == 2 and player.knocked_ns == 26_000_000_000
+
+
+def test_recall_resets_knock_stack_and_old_knock_cannot_undo_death():
+    ledger = Ledger(squad_size=4)
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, K, ns=1_000_000_000))
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, K, ns=26_000_000_000))
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, D, ns=30_000_000_000))
+    player = ledger.teams[2].players["Bravo"]
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, K, ns=30_000_000_000))
+    assert player.status is Status.DEAD and player.downs == 2
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, K, ns=100_000_000_000))
+    assert player.status is Status.KNOCKED and player.downs == 1
+    ledger.expire(130_000_000_000, 1.0)
+    assert player.status is Status.KNOCKED
+
+
+def test_full_squad_unassigns_an_old_conflicting_badge_before_a_new_teammate():
+    ledger = Ledger(squad_size=4)
+    ledger.apply(ev("Zhl0224", 8, "Other", 4))
+    ledger.apply(ev("Attacker", 16, "Zhl0224", 3))  # the first badge was wrong
+    for name in ("backlight1002", "HNM8888", "CNMA-Landong", "KaiYeaaa"):
+        ledger.apply(ev(name, 8, "Other", 4))
+    assert set(ledger.teams[8].players) == {"backlight1002", "HNM8888", "CNMA-Landong", "KaiYeaaa"}
+    assert ledger.teams[None].players["Zhl0224"].status is Status.DEAD
+    assert ledger.teams[None].kills == 1 and ledger.teams[8].kills == 4
+
+
+def test_every_published_knock_bound_and_recalled_attacker_reset():
+    ledger = Ledger(squad_size=4)
+    ns = 1_000_000_000
+    for stack, seconds in enumerate((90, 30, 30, 10, 7, 5, 4, 3, 2, 2), 1):
+        ledger.apply(ev("Alpha", 1, "Bravo", 2, K, ns=ns))
+        player = ledger.teams[2].players["Bravo"]
+        assert player.downs == stack
+        ledger.expire(ns + seconds * 1_000_000_000 - 1, 0)
+        assert player.status is Status.KNOCKED
+        ledger.expire(ns + seconds * 1_000_000_000, 0)
+        assert player.status is Status.ALIVE and not player.sure
+        ns += (seconds + 1) * 1_000_000_000
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, D, ns=ns))
+    ledger.apply(ev("Bravo", 2, "Charlie", 3, K, ns=ns + 1_000_000_000))
+    assert player.status is Status.ALIVE and player.downs == 0
+
+
+def test_delayed_kill_credit_does_not_revive_a_dead_attacker_or_reset_its_stack():
+    ledger = Ledger(squad_size=4)
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, K, ns=1_000_000_000))
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, D, ns=10_000_000_000))
+    ledger.apply(ev("Bravo", 2, "Charlie", 3, F, ns=12_000_000_000))
+    player = ledger.teams[2].players["Bravo"]
+    assert player.status is Status.DEAD and player.downs == 1
+    assert ledger.teams[2].kills == 1
+
+
+def test_delayed_finish_cannot_claim_an_unrelated_hud_recall_or_confirm_expired_knock():
+    from kfocr.domain.models import AliveCount
+
+    ledger = Ledger(squad_size=4)
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, K, ns=1_000_000_000))
+    ledger.apply(ev("Alpha", 1, "Bravo", 2, D, ns=10_000_000_000))
+    for value, seconds in ((10, 10), (10, 13), (11, 14), (11, 17)):
+        ledger.observe_alive_count(AliveCount(value, 0, seconds * 1_000_000_000))
+    ledger.apply(ev("Bravo", 2, "Charlie", 3, F, ns=18_000_000_000))
+    player = ledger.teams[2].players["Bravo"]
+    assert player.status is Status.DEAD and player.downs == 1 and ledger.returned == 1
+
+    ledger.apply(ev("Alpha", 1, "Delta", 2, K, ns=20_000_000_000))
+    ledger.expire(110_000_000_000, 0)
+    ledger.apply(ev("Delta", 2, "Echo", 3, F, ns=111_000_000_000))
+    assert not ledger.teams[2].players["Delta"].sure
+
+
+def test_a_newer_ocr_alias_cannot_erase_known_knock_stacks():
+    ledger = Ledger(squad_size=4)
+    ledger.apply(ev("Attacker", 1, "BravoWolf", 2, K, ns=1_000_000_000))
+    ledger.apply(ev("Attacker", 1, "BravoWolf", 2, K, ns=21_000_000_000))
+    ledger.apply(ev("Attacker", 1, "BravoFox", 2, K, ns=41_000_000_000))
+    for seconds, name in enumerate(("XrayNorth", "YankeeEast", "ZuluSouth"), 42):
+        ledger.apply(ev(name, 2, "Victim", 3, ns=seconds * 1_000_000_000))
+    player = ledger.teams[2].players["BravoWolf"]
+    assert player.downs == 2 and player.knocked_ns == 41_000_000_000
+    ledger.expire(71_000_000_000, 0)
+    assert player.status is Status.ALIVE and not player.sure
 
 
 def test_a_late_badge_does_not_move_a_known_player_to_a_team_never_shown():

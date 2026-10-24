@@ -14,14 +14,15 @@
   const byId = (a, b) => (a.id == null) - (b.id == null) || (a.id ?? 0) - (b.id ?? 0); // like the Tk board
   const SORTS = {
     id: byId,
-    left: (a, b) => b.left - a.left || byId(a, b),
+    left: (a, b) => (a.id == null) - (b.id == null)
+      || (b.out || b.maybe_out ? 0 : b.left) - (a.out || a.maybe_out ? 0 : a.left) || byId(a, b),
     kills: (a, b) => b.kills - a.kills || byId(a, b),
     recent: (a, b) => b.at - a.at || byId(a, b),
     sure: () => 0, // the engine's order (certain teams first); sort() is stable
   };
   const FILTERS = {
     all: () => true,
-    alive: (t) => !t.out,
+    alive: (t) => t.id != null && !t.out && !t.maybe_out,
     out: (t) => t.out,
     maybe: (t) => Boolean(t.maybe_out), // unseen 'unsure' can be lobby-wide (HUD): not per team
   };
@@ -73,7 +74,7 @@
 
     const all = KF.slots(team);
     const shown = all.slice(0, MAX_SLOTS);
-    const sig = shown.map((s) => `${s.kind}${s.name}${s.at}/${s.back}`).join() + all.length;
+    const sig = shown.map((s) => `${s.kind}${s.name}${s.at}/${s.back}/${s.downs}`).join() + all.length;
     if (el.dataset.sig === sig) return;
     el.dataset.sig = sig;
     const ul = el.querySelector('.slots');
@@ -82,11 +83,13 @@
     ul.innerHTML = shown.map((s) => {
       const [unseen, why] = UNSEEN[s.kind] ?? UNSEEN.assumed;
       const name = s.name ? KF.esc(s.name) : unseen;
-      const label = `${s.name ?? '미확인 슬롯'} ${KF.STATUS[s.kind]}`;
-      const st = s.kind === 'knocked' ? '<span class="st">기절</span>' : '';
+      const state = s.kind === 'knocked' && s.downs ? `기절 ${s.downs}차` : KF.STATUS[s.kind];
+      const label = `${s.name ?? '미확인 슬롯'} ${state}`;
+      const detail = s.kind === 'knocked' ? `관측 ${s.downs ?? 1}차 기절 · 추정 전환 기준 ${s.knock_seconds ?? 90}초 (정지·이동 및 누락된 기절은 알 수 없음)`
+        : s.kind === 'estimated' ? '기절 시간이 지났으나 사망 행이 없어 생존 추정 (소생 확인 아님)' : state;
       // lit red when the player was just knocked or killed, yellow for anything else (comeback)
-      return `<li class="slot hot-able s-${s.kind}${s.kind === 'knocked' || s.kind === 'dead' ? ' loss' : ''}" aria-label="${KF.esc(label)}">${KF.glyph(s.kind)}
-        <span class="nm" title="${KF.esc(s.name ?? why)}">${name}</span>${st}
+      return `<li class="slot hot-able s-${s.kind}${s.kind === 'knocked' || s.kind === 'dead' ? ' loss' : ''}" aria-label="${KF.esc(label)}" title="${KF.esc(detail)}">${KF.glyph(s.kind)}
+        <span class="nm" title="${KF.esc(s.name ?? why)}">${name}</span>${s.kind === 'knocked' ? `<span class="st">${state}</span>` : ''}
         <span class="st back" hidden>복귀</span></li>`;
     }).join('') + (all.length > MAX_SLOTS ? `<li class="slot more-slots">+ ${all.length - MAX_SLOTS}명</li>` : '');
     shown.forEach((s, i) => {

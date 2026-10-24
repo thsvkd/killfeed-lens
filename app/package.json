@@ -5,6 +5,7 @@
   "description": "killfeed-lens board window and game overlay (Electron) over `kfocr engine`",
   "main": "main.js",
   "scripts": {
+    "test": "node renderer.test.cjs",
     "start": "electron .",
     "demo": "electron . --demo",
     "smoke": "node smoke.mjs",

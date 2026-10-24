@@ -68,7 +68,8 @@ def _team(t: Team, drawn: tuple[dict[str, str], int]) -> dict:
             "assumed": assumed,
             "atk": _ms(t.attacked), "hit": _ms(t.hit),
             "players": [{"name": p.name, "st": states[p.name], "at": _ms(p.touched),
-                         "back": _ms(p.revived)} for p in t.players.values()]}
+                         "back": _ms(p.revived), "sure": p.sure, "downs": p.downs,
+                         "knock_seconds": p.knock_seconds} for p in t.players.values()]}
 
 
 def snapshot(led: Ledger, *, tracking: bool, status: str, error: bool,

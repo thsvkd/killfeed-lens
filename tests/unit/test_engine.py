@@ -90,7 +90,8 @@ def test_snapshot_mirrors_the_ledger_for_the_ui():
     assert [t["id"] for t in snap["teams"]] == [t.id for t in led.ranked()]  # overlay order
     victim = next(t for t in snap["teams"] if t["id"] == 25)
     assert victim["slots"] == 4 and victim["left"] == 4 and victim["at"] > 0
-    assert victim["players"] == [{"name": "b1", "st": "knocked", "at": victim["at"], "back": 0}]
+    assert victim["players"] == [{"name": "b1", "st": "knocked", "at": victim["at"], "back": 0,
+                                  "sure": True, "downs": 1, "knock_seconds": 90}]
     killer = next(t for t in snap["teams"] if t["id"] == 7)
     assert killer["kills"] == 1
     # the UI colours the attacker blue and the victim red
