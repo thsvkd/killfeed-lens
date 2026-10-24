@@ -70,11 +70,14 @@ def map_telemetry(
         finisher = _character_name(event.get("finisher"))
         killer = _character_name(event.get("killer"))
         distinct_actors = {name for name in (dbno_maker, finisher, killer) if name}
+        # The feed names whoever finished the victim (live: 48 of 48 finishes of another
+        # player's knock, a teammate's too, where Telemetry credits the knocker as the killer).
+        actors = [finisher] if finisher else list(distinct_actors) if len(distinct_actors) == 1 else []
         canonical.append(
             TelemetryCanonicalEvent(
                 occurred_at_utc=occurred_at,
                 event_type=EventType.SUICIDE if event.get("isSuicide") is True else EventType.KILL,
-                actor_candidates=list(distinct_actors) if len(distinct_actors) == 1 else [],
+                actor_candidates=actors,
                 victim=victim,
                 dBNO_maker=dbno_maker,
                 finisher=finisher,

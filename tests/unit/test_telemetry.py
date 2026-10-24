@@ -197,33 +197,31 @@ def test_client_refuses_retry_after_larger_than_bounded_wait_budget():
     assert sleeps == []
 
 
-def test_map_telemetry_refuses_ambiguous_kill_actor():
-    mapped = map_telemetry(
-        [
-            {
-                "_T": "LogPlayerKillV2",
-                "_D": "2026-10-06T12:00:10.000Z",
-                "victim": _character("Victim"),
-                "dBNOMaker": _character("Knocker"),
-                "finisher": _character("Finisher"),
-                "killer": _character("Killer"),
-                "isSuicide": False,
-            },
-            {
-                "_T": "LogPlayerMakeGroggy",
-                "_D": "2026-10-06T12:00:11.000Z",
-                "attacker": _character("Attacker"),
-                "victim": _character("OtherVictim"),
-            },
-        ]
-    )
+def test_map_telemetry_credits_a_kill_to_its_finisher_and_refuses_one_without():
+    def kill(second: int, finisher: str | None) -> dict:
+        return {"_T": "LogPlayerKillV2", "_D": f"2026-10-06T12:00:{second:02d}.000Z",
+                "victim": _character(f"Victim{second}"), "dBNOMaker": _character("Knocker"),
+                "finisher": _character(finisher),
+                "killer": _character("Killer"), "isSuicide": False}
 
-    assert mapped[0].actor_candidates == []
+    mapped = map_telemetry([
+        kill(10, "Finisher"),  # the feed shows the finisher
+        {
+            "_T": "LogPlayerMakeGroggy",
+            "_D": "2026-10-06T12:00:11.000Z",
+            "attacker": _character("Attacker"),
+            "victim": _character("OtherVictim"),
+        },
+        kill(12, None),
+    ])
+
+    assert mapped[0].actor_candidates == ["Finisher"]
     assert mapped[0].dBNO_maker == "Knocker"
     assert mapped[0].finisher == "Finisher"
     assert mapped[0].killer == "Killer"
     assert mapped[1].actor_candidates == ["Attacker"]
     assert mapped[1].event_type == EventType.KNOCK
+    assert mapped[2].actor_candidates == []  # knocker and killer disagree, no finisher
 
 
 def test_map_telemetry_resolves_kill_only_when_actor_fields_agree():
