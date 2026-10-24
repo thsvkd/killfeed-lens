@@ -91,6 +91,19 @@ def test_reader_finds_names_and_borderless_badges_from_the_row_layout():
     assert all(type(v) is int for e in tokens + badges for v in e.bbox)  # stored as JSON
 
 
+def test_a_name_ending_in_a_dash_keeps_it_beside_a_black_boxed_badge(monkeypatch):
+    # Live: the black-bordered badge box is cleared from the ink, so a trailing "-" is the side's
+    # last run and smaller than a speck (Tiger match: 11 victims lost it).
+    image, icon = synthetic_row("Alpha_7", "bravo-Q2-")
+    ys, xs = np.nonzero((image == (150, 70, 120)).all(axis=2) & (np.arange(image.shape[1]) > icon.bbox[2]))
+    box = (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
+    monkeypatch.setattr("kfocr.vision.glyphs.find_badges", lambda _image: [box])
+    reader = NameReader(lambda images: [("99", 0.99)] * len(images),
+                        GlyphTemplates.load(ASSET), GlyphTemplates.load(ASSET, "digits"))
+    tokens, _ = reader.read(image, [icon])
+    assert [token.text for token in tokens] == ["Alpha_7", "bravo-Q2-"]
+
+
 @pytest.mark.parametrize("read, expected", [("[AB] bravo.Q 2", "bravo_Q_2"), ("||", None)])
 def test_without_templates_names_fall_back_to_recognition_in_the_name_alphabet(read, expected):
     image, icon = synthetic_row("Alpha_7", "bravo-Q2")

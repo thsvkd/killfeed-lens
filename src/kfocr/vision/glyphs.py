@@ -184,11 +184,22 @@ class Row:
         return _runs(self.ink[:, x0:x1].any(axis=0), x0) if x1 > x0 else []
 
     def _trim(self, blobs: list[Run]) -> list[Run]:
-        """Drop specks at either end of a side (marker shadow, badge border remnants)."""
-        speck = 6 * self.scale ** 2
-        while blobs and self.ink[:, blobs[0][0]:blobs[0][1]].sum() < speck:
+        """Drop specks at either end of a side (marker shadow, badge border remnants). A dash is
+        no speck: a flat stroke 3+ wide well above the baseline, a name's "-" next to a cleared
+        badge box (specks are 1-2 wide, or sit on or below the baseline)."""
+        s = self.scale
+        base = int(round(_UP * s))  # the baseline's row in the window
+
+        def speck(blob: Run) -> bool:
+            ink = self.ink[:, blob[0]:blob[1]]
+            if ink.sum() >= 6 * s * s:
+                return False
+            ys = np.flatnonzero(ink.any(axis=1))
+            return not (blob[1] - blob[0] >= 3 * s and ys[-1] - ys[0] < 2 * s and base - ys[-1] >= 4 * s)
+
+        while blobs and speck(blobs[0]):
             blobs = blobs[1:]
-        while blobs and self.ink[:, blobs[-1][0]:blobs[-1][1]].sum() < speck:
+        while blobs and speck(blobs[-1]):
             blobs = blobs[:-1]
         return blobs
 
