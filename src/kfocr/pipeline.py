@@ -45,6 +45,10 @@ MATCH_ENDED_NS = 45_000_000_000
 # after dying at about the next lobby's size merges two. Retune with recorded lobbies.
 NEW_MATCH_RISE = 4
 NEW_MATCH_AWAY_NS = 180_000_000_000
+# A count back after MATCH_ENDED_NS with none read while digits stayed in the box can be the same
+# match read poorly for minutes (a "66" stayed under the confidence bar for 17 s): there only a
+# rise no recall wave makes (vision.alive: at most 7 at once) is a new match, however long it took.
+UNREAD_MATCH_RISE = 9
 
 
 def _crop(frame: Frame, rect: NormalizedRect) -> np.ndarray:
@@ -236,7 +240,9 @@ class Pipeline:
         # count showed; while away (back after a gap) it stays there until a sure count judges it.
         hud_ns: int | None = None
         last_count: int | None = None
+        last_count_ns: int | None = None
         away = False
+        unread = False  # away only for want of a count: the box kept showing digits
         back_count: int | None = None  # the first sure count after an absence, until a second agrees
         commit = _git_commit()
         match_over = False  # "ended" published for the current absence
@@ -386,20 +392,27 @@ class Pipeline:
                                 gone >= MATCH_ENDED_NS):
                             match_over = True
                             publish_match("ended")
+                        if (reading is not None and not away and last_count_ns is not None
+                                and end_ns - last_count_ns >= MATCH_ENDED_NS):
+                            # No count that long though digits stayed in the box: a lobby or
+                            # starting island read as the HUD (live: a requeue 3 min after dying
+                            # merged two matches). Judge the count's return as after an absence.
+                            away, hud_ns, unread = True, last_count_ns, True
                         # Judged on two sure counts in a row: the HUD bar is low (vision.alive),
                         # and one misread rise would reset the board mid-match.
                         if reading is not None and away and reading.count != back_count:
                             back_count = reading.count
                         elif reading is not None and away:
-                            if gone >= NEW_MATCH_AWAY_NS or last_count is None or (
-                                    reading.count >= last_count + NEW_MATCH_RISE):
+                            rise = UNREAD_MATCH_RISE if unread else NEW_MATCH_RISE
+                            if (gone >= NEW_MATCH_AWAY_NS and not unread) or last_count is None or (
+                                    reading.count >= last_count + rise):
                                 ended_ns = hud_ns
                                 publish_match("new")
                             else:
                                 publish_match("playing")
-                            away, hud_ns, match_over, back_count = False, end_ns, False, None
+                            away, hud_ns, match_over, back_count, unread = False, end_ns, False, None, False
                         if reading is not None and not away:
-                            last_count = reading.count
+                            last_count, last_count_ns = reading.count, end_ns
                             if ended_ns is None:  # else it is the next match's count already
                                 session.metadata.setdefault("first_observed_alive", reading.count)
                                 session.metadata["last_observed_alive"] = reading.count

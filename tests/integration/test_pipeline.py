@@ -354,6 +354,62 @@ def test_hud_count_back_after_a_long_absence_judges_a_new_match(tmp_path, back_s
     store.close()
 
 
+@pytest.mark.parametrize("back_s, back, states", [
+    (200, "38", ["playing"]),  # the same match read poorly for minutes: no time rule here
+    (60, "45", ["playing"]),  # a recall wave
+])
+def test_a_count_back_after_digits_without_one_needs_a_rise_no_recall_makes(tmp_path, back_s, back,
+                                                                           states):
+    from kfocr.pipeline import Pipeline
+
+    class Matches(Sink):
+        def __init__(self):
+            super().__init__()
+            self.states = []
+
+        def publish_match(self, state):
+            self.states.append(state)
+
+    config, sink = setup(tmp_path), Matches()
+    config.roi.rect = NormalizedRect(0, 0, 0.7, 1)
+    config.roi.alive_rect = NormalizedRect(0.8, 0, 0.2, 0.2)
+    text = HUDText({41: "", 42: "40", 43: back, 44: "4O"})  # "4O": digits but no count
+    spans = [(0, 20, 1), *((s, 10, 3) for s in range(10, back_s, 30)), (back_s, 20, 2)]
+    Pipeline(config, Match(spans), recognizer=text, reader=text, icons=Icons(), sink=sink,
+             started_at_utc=datetime(2026, 10, 1, tzinfo=UTC)).run()
+    assert sink.states == states
+
+
+def test_digits_in_the_box_between_matches_do_not_merge_them(tmp_path):
+    from kfocr.pipeline import Pipeline
+    from kfocr.storage.db import EventStore
+
+    class Matches(Sink):
+        def __init__(self):
+            super().__init__()
+            self.states = []
+
+        def publish_match(self, state):
+            self.states.append(state)
+
+    start = datetime(2026, 10, 1, tzinfo=UTC)
+    config, sink = setup(tmp_path), Matches()
+    config.roi.rect = NormalizedRect(0, 0, 0.7, 1)
+    config.roi.alive_rect = NormalizedRect(0.8, 0, 0.2, 0.2)
+    # 40 alive, then a lobby whose "12,345" reads as the HUD shown but no count (never gone
+    # 45 s), then the next match at 95
+    text = HUDText({41: "", 42: "40", 43: "95", 44: "12,345"})
+    source = Match([(0, 20, 1), (10, 10, 3), (40, 10, 3), (70, 10, 3), (90, 20, 2)])
+    last = Pipeline(config, source, recognizer=text, reader=text, icons=Icons(), sink=sink,
+                    started_at_utc=start).run()
+    store = EventStore(config.storage.sqlite_path)
+    first, second = sorted(store.list_sessions(), key=lambda s: s.started_at_utc)
+    assert sink.states == ["new"] and second.session_id == last.session_id
+    assert first.ended_at_utc == start + timedelta(seconds=1.5)  # the last count seen
+    assert last.metadata["first_observed_alive"] == 95
+    store.close()
+
+
 def test_one_misread_rise_after_an_absence_does_not_start_a_new_match(tmp_path):
     from kfocr.pipeline import Pipeline
 
