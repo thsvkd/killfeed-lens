@@ -224,6 +224,26 @@ def test_settings_command_saves_restarts_capture_and_rejects_bad_values():
     thread.join(5)
 
 
+def test_a_failed_capture_is_restarted_while_tracking_is_on(monkeypatch):
+    monkeypatch.setattr(eng, "TICK_S", 0.01)
+    monkeypatch.setattr(eng, "RETRY_S", 0.05)
+    feed = FakeFeed()
+    _, out, stdin, thread = start_engine(feed)
+    wait_for(lambda: snaps(out))
+    time.sleep(0.1)
+    assert feed.calls == ["start"]  # a healthy capture is left alone
+
+    feed.error = "Screen capture stale_frames after 3 reconnect attempts"  # a lock screen
+    wait_for(lambda: feed.calls[-2:] == ["stop", "start"])
+    stdin.send({"cmd": "tracking", "on": False})
+    wait_for(lambda: snaps(out)[-1]["tracking"] is False)
+    calls = len(feed.calls)
+    time.sleep(0.2)
+    assert len(feed.calls) == calls  # not while tracking is off
+    stdin.close()
+    thread.join(5)
+
+
 def test_events_and_hud_readings_go_out_once_per_change():
     feed = FakeFeed()
     inbox, out, stdin, thread = start_engine(feed)

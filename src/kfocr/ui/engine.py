@@ -30,6 +30,7 @@ from kfocr.ui.teams import Ledger, Team
 
 LOG = logging.getLogger("kfocr.engine")
 TICK_S = 0.5  # quiet-time housekeeping: knock expiry, capture health
+RETRY_S = 30  # a failed capture (lock screen, sleep, display change) is restarted this often
 KEEP_EVENTS = 20
 _HUD_AGE = re.compile(r" \(\d+초 전 관측\)")  # Ledger.basis' live age; the UI renders it from hud.at
 _EOF, _RESET = object(), object()
@@ -147,6 +148,7 @@ class LiveFeed:
         self.config: AppConfig | None = None
         self.source: Any = None
         self.error: str | None = None
+        self.failed: str | None = None
         self.idle = "캡처 대기"
         self._thread: threading.Thread | None = None
 
@@ -226,8 +228,12 @@ class LiveFeed:
             if source.closing:  # stopped before the first frame; nothing to report
                 LOG.info("live capture stopped before the first frame")
                 return
-            LOG.exception("live capture failed")
-            self.error = str(exc) or type(exc).__name__
+            error = str(exc) or type(exc).__name__
+            if error == self.failed:  # retried: a locked screen fails the same way all night
+                LOG.warning("live capture failed again: %s", error)
+            else:
+                LOG.exception("live capture failed")
+            self.error = self.failed = error
 
     def stop(self, timeout: float = 15) -> None:
         if self.source:
@@ -336,6 +342,7 @@ class Engine:
         self.match_over = False
         self.seq = 0
         self._last: dict | None = None
+        self._retry_at = 0.0
 
     @property
     def status(self) -> tuple[str, bool]:
@@ -450,9 +457,21 @@ class Engine:
                 except queue.Empty:
                     pass
                 self.led.tick(time.monotonic())
+                self.retry()
                 self.emit()
         finally:
             self.feed.stop()
+
+    def retry(self) -> None:
+        """Restart a failed capture every RETRY_S while tracking is on: the capture gives up within
+        seconds of a lock screen, and the desktop may come back hours later."""
+        now = time.monotonic()
+        if not (self.feed.error and self.tracking and not self.editing):
+            self._retry_at = now + RETRY_S
+        elif now >= self._retry_at:
+            self._retry_at = now + RETRY_S
+            self.feed.stop()
+            self.feed.start()
 
 
 def run(*, demo: bool = False, speed: float = 1.0, roi_profile: Path | None = None,

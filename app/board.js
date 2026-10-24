@@ -188,7 +188,7 @@
     let markup;
     if (!engine.alive) markup = `${KF.glyph('warn')}${KF.esc(engine.reason || '엔진 연결 안 됨')}`;
     else if (!snap) markup = `${KF.glyph('pause')}엔진 시작 중…`;
-    else if (snap.error) markup = `${KF.glyph('warn')}캡처 오류: ${KF.esc(snap.status)}`;
+    else if (snap.error) markup = `${KF.glyph('warn')}${KF.esc(snap.status)}`;  // the engine words it
     else markup = `${KF.glyph(snap.tracking ? 'live' : 'pause')}${KF.esc(snap.status)}`;
     pill.classList.toggle('err', !engine.alive || Boolean(snap?.error));
     KF.html(pill, markup);
