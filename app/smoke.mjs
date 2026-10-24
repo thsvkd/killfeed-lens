@@ -12,7 +12,7 @@ import { join } from 'node:path';
 const packaged = process.argv[2];
 const [exe, args] = packaged ? [packaged, []] : [(await import('electron')).default, ['.']];
 const dir = mkdtempSync(join(tmpdir(), 'kfl-smoke-'));
-const run = spawnSync(exe, [...args, '--demo', '--shots', dir],
+const run = spawnSync(exe, [...args, `--user-data-dir=${join(dir, 'user-data')}`, '--demo', '--shots', dir],
                       { cwd: import.meta.dirname, encoding: 'utf8', timeout: 300_000 });
 const logged = `${run.stdout ?? ''}${run.stderr ?? ''}`.split(/\r?\n/)
   .filter((l) => /^\[(board|overlay|roi|settings)\]/.test(l));
