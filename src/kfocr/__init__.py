@@ -6,5 +6,5 @@ import os
 # cores and spin; with PUBG running one thread cost 2.8 ms CPU per name instead of 10 ms.
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
