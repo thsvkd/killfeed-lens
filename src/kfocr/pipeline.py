@@ -27,6 +27,12 @@ from kfocr.domain.models import Frame, NormalizedRect, Session
 from kfocr.logging import log_event
 from kfocr.ui.sidecar import ConsoleSink
 
+# OpenCV's pool (ConcRT here: one normal-priority thread per core, out of lower_thread_priority's
+# reach) takes dxcam's per-frame BGRA->BGR cvtColor: at 30 Hz the frame's conversion plus change
+# check took about the same wall time, 1.0 ms CPU on one thread and 1.2-3.1 ms on the pool.
+# OPENCV_FOR_THREADS_NUM does not cap the ConcRT build; this does.
+cv2.setNumThreads(1)
+
 
 class PipelineBusyError(RuntimeError):
     pass
