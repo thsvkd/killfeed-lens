@@ -77,6 +77,12 @@ app.whenReady().then(async () => {
   });
   const fits = await overlay.webContents.executeJavaScript(`[...document.querySelectorAll('.row')].every(row => [...row.querySelectorAll('.pip,.maybe-tag')].every(s=>s.getBoundingClientRect().bottom<=row.getBoundingClientRect().bottom))`);
   check('상태 기호가 다음 팀과 겹치지 않음', () => assert.ok(fits));
+  // Hosted Windows can prefer reduced motion. Exercise both policies explicitly rather than
+  // interpreting the accessibility branch's intentional hold-then-hide as a broken fade.
+  board.webContents.debugger.attach('1.3');
+  await board.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+  });
   const fade = await board.webContents.executeJavaScript(`(async () => {
     KF.sync({now:performance.now()});
     const el=document.createElement('div'); el.className='hot-able'; document.body.append(el);
@@ -97,6 +103,25 @@ app.whenReady().then(async () => {
     assert.ok(fade.rebuilt < 0.08); assert.equal(fade.values.at(-1), 0); assert.equal(fade.active.length, 0);
   });
   console.log(JSON.stringify({ fade }));
+  await board.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+  });
+  const reduced = await board.webContents.executeJavaScript(`(async()=>{
+    KF.sync({now:performance.now()});
+    await new Promise(r=>requestAnimationFrame(r));
+    const el=document.createElement('div');el.className='hot-able';document.body.append(el);
+    KF.heat(el,KF.now()-(KF.HOLD-250));
+    const before=Number(getComputedStyle(el,'::before').opacity);
+    await new Promise((resolve,reject)=>{
+      const end=performance.now()+2000;
+      const poll=()=>!el.classList.contains('hot')?resolve():performance.now()>end?reject(new Error('reduced motion highlight not removed')):setTimeout(poll,20);poll();
+    });
+    return {before,after:Number(getComputedStyle(el,'::before').opacity),active:el.getAnimations().length};
+  })()`);
+  check('모션 줄이기는 보간 없이 강조를 유지한 뒤 제거', () => {
+    assert.equal(reduced.before, 1); assert.equal(reduced.after, 0); assert.equal(reduced.active, 0);
+  });
+  board.webContents.debugger.detach();
   const settings = await open('settings.html', 'settings:ready');
   settings.setSize(560, 800);
   const settingsBase = { ui: { closeToTray: true, openAtLogin: false, startHidden: false },
