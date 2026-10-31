@@ -76,6 +76,9 @@ jobs:
         with:
           generate_release_notes: true
           # The portable exe is dropped while the Electron UI settles; only the installer ships.
-          body: 설치 파일만 배포합니다. Electron UI로 바뀌면서 portable exe는 당분간 제공하지 않습니다.
+          body: |
+            Windows x64 설치 파일을 배포합니다. portable exe는 당분간 제공하지 않습니다.
+            0.5.0부터 설정 → 정보 → 앱 업데이트에서 새 버전을 확인·다운로드·적용할 수 있습니다.
+            0.4.1 이하를 쓰고 있다면 OTA가 포함된 새 설치 파일을 한 번 직접 설치해 주세요.
           fail_on_unmatched_files: true
           files: release-assets/*-setup.exe

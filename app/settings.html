@@ -70,9 +70,15 @@
         <span class="lbl">버전</span>
         <span id="version" class="val num">-</span>
       </p>
+      <div class="row update-row">
+        <span class="txt"><span class="lbl">앱 업데이트</span><small id="update-status" role="status" aria-live="polite"></small></span>
+        <button id="update-action" type="button" class="btn" disabled>설치판에서 사용</button>
+      </div>
+      <progress id="update-progress" max="100" value="0" aria-label="업데이트 다운로드 진행률" hidden></progress>
       <div class="row actions">
         <button id="open-data" type="button" class="btn">데이터 폴더 열기</button>
         <button id="open-logs" type="button" class="btn">로그 폴더 열기</button>
+        <button id="open-updates" type="button" class="btn">업데이트 로그</button>
       </div>
     </div>
   </section>

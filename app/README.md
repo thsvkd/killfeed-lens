@@ -13,7 +13,7 @@ cd app
 npm install          :: electron 44.5.1, pretendard 1.3.9 (exact pin, package-lock.json)
 npm start            :: uv run kfocr engine (레포 루트 기준 data/로 실시간 캡처)
 npm run demo         :: uv run kfocr engine --demo (가짜 경기, ROI는 메모리에만)
-npm test             :: 별도 임시 설정의 숨김 Electron 창으로 필터·정렬·상태·페이드 검증
+npm test             :: 업데이트·격리된 설치 보조 프로세스·숨김 Electron 창의 UI/IPC 검증
 npm run smoke        :: 데모 엔진으로 --shots 실행, 네 창의 PNG·트레이로 닫기·렌더러 오류 없음 확인
 ```
 
@@ -51,6 +51,15 @@ npm run smoke        :: 데모 엔진으로 --shots 실행, 네 창의 PNG·트�
 이어서 `@electron/fuses` 2.1.3이 RunAsNode·NODE_OPTIONS·NodeCliInspect를 끄고 OnlyLoadAppFromAsar·asar integrity를 켭니다.
 설치판은 엔진을 `resources\killfeed-lens\kfocr.exe engine`으로 실행하며, `KFL_ENGINE`은 읽지 않습니다.
 코드 서명은 하지 않습니다.
+
+설치판은 공개 GitHub Releases의 정식 버전만 OTA로 확인합니다. 시작 후 10초에는 버전 확인만 하며,
+설정에서 다운로드·적용을 실행합니다. 업데이트 모듈(`updater.js`)이 주소·파일명·크기·SHA-256을 검증하고,
+사용자가 재시작을 확인하면 `install-update.ps1`이 앱과 엔진의 종료를 기다린 뒤 기존 Inno 설치기를 실행합니다.
+보조 프로세스 준비가 실패하면 현재 앱은 유지됩니다. 개발 실행·데모·`--shots`에서는 업데이트가 비활성입니다.
+Windows GUI 런처(`packaging/update-launcher.cs`)가 숨겨진 PowerShell을 소유하므로 앱이 종료된 뒤에도 설치가 이어집니다.
+런처와 스크립트는 업데이트 작업 폴더에서 실행하며 설치 대상 파일을 잠그지 않습니다.
+`node app/smoke.mjs <패키지의 KillfeedLens.exe> --check-only`는 창을 띄우지 않고 런처·업데이트 모듈·고지 포함과 테스트 파일 제외를 확인합니다(저장소 루트에서 실행).
+설치 결과와 로그는 `app.getPath('userData')/updates`에 남고 설정의 '업데이트 로그'로 엽니다.
 
 ## 사용
 
@@ -105,4 +114,5 @@ npm run smoke        :: 데모 엔진으로 --shots 실행, 네 창의 PNG·트�
 | `settings.html`, `settings.js`, `settings.css` | 설정 창 |
 | `icon.ico` | 트레이 아이콘(`packaging\killfeed-lens.ico` 복사본) |
 | `package.mjs` | 패키징과 fuses(`script\package.ps1`이 호출) |
+| `updater.js`, `install-update.ps1` | 릴리스 검증·다운로드·앱 종료 후 설치·결과 기록 |
 | `smoke.mjs`, `measure.ps1` | 스모크 확인, 자원 측정 |

@@ -4,6 +4,8 @@
 //   dist/KillfeedLens-win32-x64/resources/killfeed-lens/  the engine: kfocr.exe engine
 // then flips the Electron fuses. Usage: npm run package -- <version>
 import { join, resolve } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { FuseV1Options, FuseVersion, flipFuses } from '@electron/fuses';
 import { packager } from '@electron/packager';
 
@@ -11,13 +13,20 @@ const version = process.argv[2];
 if (!/^\d+\.\d+\.\d+$/.test(version ?? '')) throw new Error('usage: npm run package -- <x.y.z version>');
 const root = resolve(import.meta.dirname, '..');
 const engine = join(root, 'dist', 'killfeed-lens');
+// Compile with the .NET Framework already shipped with Windows; no new runtime download.
+const launcher = join(root, 'build', 'UpdateLauncher.exe');
+await mkdir(join(root, 'build'), { recursive: true });
+const compiler = join(process.env.SystemRoot, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
+const compiled = spawnSync(compiler, ['/nologo', '/target:winexe', '/platform:x64', '/optimize+',
+  `/out:${launcher}`, join(root, 'packaging', 'update-launcher.cs')], { encoding: 'utf8', windowsHide: true });
+if (compiled.status !== 0) throw new Error(`Update launcher compilation failed: ${compiled.error || compiled.stdout || compiled.stderr}`);
 
 // From node_modules only the font file the pages load and its licence: Pretendard is the one
 // runtime dependency, and its npm package also carries ~95 MB of other formats and subsets.
 const FONT = ['/node_modules/pretendard/package.json', '/node_modules/pretendard/dist/LICENSE.txt',
               '/node_modules/pretendard/dist/web/variable/pretendardvariable.css',
               '/node_modules/pretendard/dist/web/variable/woff2/PretendardVariable.woff2'];
-const DEV = /^\/(package-lock\.json|\.gitignore|README\.md|CONTRACT\.md|renderer\.test\.cjs|smoke\.mjs|package\.mjs|measure\.ps1|\.omc(\/.*)?)$/;
+const DEV = /^\/(package-lock\.json|\.gitignore|README\.md|CONTRACT\.md|[^/]+\.test\.cjs|smoke\.mjs|package\.mjs|measure\.ps1|\.omc(\/.*)?)$/;
 
 function ignore(path) {
   if (DEV.test(path)) return true;
@@ -40,7 +49,7 @@ const [out] = await packager({
   prune: true,
   overwrite: true,
   ignore,
-  extraResource: [engine],
+  extraResource: [engine, launcher],
   win32metadata: { CompanyName: 'thsvkd', FileDescription: 'killfeed-lens',
                    ProductName: 'killfeed-lens', OriginalFilename: 'KillfeedLens.exe' },
 });

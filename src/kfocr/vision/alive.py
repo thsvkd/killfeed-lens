@@ -32,6 +32,31 @@ def _lost_digit(short: int, long: int) -> bool:
     return len(a) == len(b) - 1 and any(b[:i] + b[i + 1:] == a for i in range(len(b)))
 
 
+def _number_crop(image: np.ndarray, text: str) -> tuple[np.ndarray, int] | None:
+    """Retry only when aligned bright glyphs outnumber the recognized digits."""
+    low = image.min(axis=2) if image.ndim == 3 else image
+    high = image.max(axis=2) if image.ndim == 3 else image
+    mask = np.asarray((low >= 180) & (high.astype(int) - low <= 40), dtype=np.uint8)
+    _, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+    glyphs = [(x, y, w, h) for x, y, w, h, area in stats[1:]
+              if h >= max(8, image.shape[0] / 4) and w <= h and area >= w * h / 5]
+    if not 1 <= len(glyphs) <= 3:
+        return None
+    # A dimmer digit may be absent from this mask. Never shorten an already complete read.
+    if re.fullmatch(r"[0-9]{1,3}", text) and len(text) >= len(glyphs):
+        return None
+    height = max(h for _, _, _, h in glyphs)
+    bottoms = [y + h for _, y, _, h in glyphs]
+    if (min(h for _, _, _, h in glyphs) < height * 0.7
+            or max(bottoms) - min(bottoms) > height * 0.2):
+        return None
+    pad = max(2, round(height / 10))
+    x0, y0 = min(x for x, _, _, _ in glyphs), min(y for _, y, _, _ in glyphs)
+    x1, y1 = max(x + w for x, _, w, _ in glyphs), max(bottoms)
+    return (image[max(0, y0 - pad):min(image.shape[0], y1 + pad),
+                  max(0, x0 - pad):min(image.shape[1], x1 + pad)], len(glyphs))
+
+
 class AliveCountReader:
     def __init__(self, confidence_min: float = CONFIDENCE_MIN, evidence_frames: int = 2,
                  evidence_window_ms: int = 750):
@@ -65,6 +90,27 @@ class AliveCountReader:
                 if len(reads) == 1:
                     text, confidence = reads[0]
                     text = text.strip()
+                    # Padding shrinks condensed/repeated digits in the OCR model's fixed-height
+                    # input. Retry a visible three-glyph "100" read as "10", without replacing
+                    # valid original evidence when the optional crop is incomplete or fails.
+                    crop = _number_crop(image, text)
+                    if crop is not None:
+                        number, digits = crop
+                        scale = max(1.0, 48 / number.shape[0])
+                        line = cv2.resize(number, None, fx=scale, fy=scale,
+                                          interpolation=cv2.INTER_CUBIC)
+                        try:
+                            retry = (read_lines([line]) if read_lines else
+                                     [(t.text, t.confidence) for t in recognizer.recognize(line)])
+                            if len(retry) == 1:
+                                candidate, score = retry[0]
+                                candidate = candidate.strip()
+                                if (math.isfinite(score) and self.confidence_min <= score <= 1
+                                        and re.fullmatch(rf"[0-9]{{{digits}}}", candidate)
+                                        and int(candidate) <= 100):
+                                    text, confidence = candidate, score
+                        except Exception:
+                            pass  # optional correction must not discard the original HUD read
                     # no HUD (lobby, loading, starting island) reads "" or noise below 0.2
                     if confidence >= 0.5 and re.search(r"[0-9]", text):
                         self.shown_ns = observed_at_ns

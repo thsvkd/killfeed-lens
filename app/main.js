@@ -3,11 +3,12 @@
 // its snapshots out to the board window and the overlay, and owns the overlay's placement,
 // visibility, click-through and capture exclusion, plus the ROI editor, the settings window and the
 // tray (closing the board hides it there; the app ends only through quit()).
-const { app, BrowserWindow, Menu, Tray, globalShortcut, ipcMain, nativeTheme, screen, shell } = require('electron');
+const { app, BrowserWindow, Menu, Tray, globalShortcut, ipcMain, nativeTheme, screen, shell, dialog } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
+const { Updater } = require('./updater');
 
 const argv = process.argv.slice(1);
 const flag = (name) => argv.includes(name);
@@ -40,6 +41,8 @@ let last = null; // latest snapshot
 let frozen = false; // --shots: ignore new snapshots while capturing
 let guided = false; // the first-run ROI guide opens once per launch
 let quitting = false; // quit() runs: the board's X no longer hides it
+let updater = null;
+let updateConfirming = false;
 const ov = { wanted: true, editing: false, hotkey: false, pos: null, w: OVERLAY_W, h: 200 };
 
 const webPreferences = {
@@ -372,6 +375,7 @@ function settingsState() {
     overlay: { wanted: ov.wanted, hotkey: ov.hotkey },
     engine: (engine && last?.settings) || null, // unknown until a running engine reports them
     version: app.getVersion(), hotkey: 'Ctrl+Alt+O', packaged: app.isPackaged,
+    update: updater?.state || { status: 'disabled', message: '설치된 Windows 앱에서 사용할 수 있습니다.' },
   };
 }
 
@@ -380,7 +384,7 @@ function refresh() {
   const status = engine ? (last?.status ?? '엔진 시작 중') : '엔진 연결 안 됨';
   const ready = Boolean(engine && last);
   const tracking = ready && Boolean(last.tracking);
-  const key = JSON.stringify([status, tracking, ready, ov.wanted]);
+  const key = JSON.stringify([status, tracking, ready, ov.wanted, updater?.state.status, updater?.state.version]);
   if (tray && key !== trayKey) {
     trayKey = key;
     tray.setToolTip(`killfeed-lens · ${status}`);
@@ -391,6 +395,8 @@ function refresh() {
         // rebuilt from the truth: the next snapshot shows whether the engine followed
         click: () => { sendEngine({ cmd: 'tracking', on: !tracking }); trayKey = ''; refresh(); } },
       { label: '설정…', click: openSettings },
+      { label: updater?.state.status === 'available' ? `새 버전 ${updater.state.version} 업데이트…` : '앱 업데이트…',
+        enabled: Boolean(updater), click: openSettings },
       { type: 'separator' },
       { label: '종료', click: quit },
     ]));
@@ -475,8 +481,9 @@ ipcMain.on('settings:set', (_e, msg) => {
   refresh();
 });
 ipcMain.on('app:open', (_e, which) => {
-  if (which !== 'data' && which !== 'logs') return;
-  const dir = which === 'logs' ? path.join(dataDir(), 'logs') : dataDir();
+  if (!['data', 'logs', 'updates'].includes(which)) return;
+  const dir = which === 'updates' ? path.join(app.getPath('userData'), 'updates')
+    : which === 'logs' ? path.join(dataDir(), 'logs') : dataDir();
   try {
     fs.mkdirSync(dir, { recursive: true });
   } catch (err) {
@@ -485,13 +492,41 @@ ipcMain.on('app:open', (_e, which) => {
   shell.openPath(dir).then((err) => { if (err) console.error(`app:open ${dir}: ${err}`); });
 });
 
+// Only the settings window can trigger updates; renderer input never supplies paths or URLs.
+const updateSender = (event) => updater && !quitting && event.sender === settingsWin?.webContents;
+ipcMain.on('update:check', (event) => { if (updateSender(event)) void updater.check(); });
+ipcMain.on('update:download', (event) => { if (updateSender(event)) void updater.download(); });
+ipcMain.on('update:install', async (event) => {
+  if (!updateSender(event) || updateConfirming || updater.state.status !== 'ready') return;
+  updateConfirming = true;
+  try {
+    const answer = await dialog.showMessageBox(settingsWin, {
+      type: 'question', title: 'killfeed-lens 업데이트', message: '업데이트를 적용하고 앱을 다시 시작할까요?',
+      detail: '현재 킬피드 추적과 오버레이가 종료됩니다. 설정과 경기 기록은 유지됩니다.',
+      buttons: ['취소', '업데이트하고 재시작'], defaultId: 0, cancelId: 0, noLink: true,
+    });
+    if (answer.response !== 1 || quitting) return;
+    const started = await updater.install({ appExe: process.execPath, appPid: process.pid, enginePid: engine?.pid || 0 });
+    if (started && !quitting) await quit();
+  } catch (error) {
+    console.error(`update install: ${error.message}`);
+  } finally { updateConfirming = false; }
+});
+
 // --- app -------------------------------------------------------------------------------------
 if (!app.requestSingleInstanceLock()) app.exit(0); // a second engine would fight over the camera
 app.on('second-instance', () => showBoard());
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   nativeTheme.themeSource = 'dark'; // dark native title bar
   loadUi();
+  if (app.isPackaged && process.platform === 'win32' && !DEMO && !SHOTS) {
+    try {
+      updater = new Updater({ version: app.getVersion(), directory: path.join(app.getPath('userData'), 'updates'),
+        launcherPath: path.join(process.resourcesPath, 'UpdateLauncher.exe'), onChange: refresh });
+      await updater.readResult();
+    } catch (error) { console.error(`update setup: ${error.message}`); }
+  }
   createBoard();
   createOverlay();
   createTray();
@@ -499,6 +534,9 @@ app.whenReady().then(() => {
   // Games and other topmost windows can push the overlay down; re-assert while it is shown.
   setInterval(() => { if (overlay?.isVisible()) overlay.moveTop(); }, 2000);
   startEngine();
+  if (updater && updater.state.status !== 'error') {
+    setTimeout(() => { if (!quitting) void updater.check(); }, 10_000).unref();
+  }
   if (SHOTS) shoot(SHOTS);
 });
 

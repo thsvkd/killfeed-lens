@@ -46,7 +46,7 @@ portable exe, 로컬 `script/package.ps1`)를 이 저장소의 Python 앱에 옮
 | D16 | ROI 프로필이 없으면 첫 실행에서 보정을 안내하고, 기존 `kfocr calibrate`의 드래그 선택 로직(`cli._calibrate`)을 재사용해 데이터 폴더의 `roi.yaml`에 저장한 뒤 캡처를 시작한다. 툴바에 **ROI 다시 보정** | 보정 코드를 두 벌 두지 않는다 |
 | D17 | 패키징 스모크는 `scripts/smoke_packaged.py` 하나를 CI와 `script/package.ps1`이 같이 쓴다: `--help`, `gui --demo --exit-after 3`, 합성 영상 `replay`로 번들 ONNX 모델 로드·OCR 실행 확인 | ftp-browser `smoke:packaged`와 같은 역할 |
 | D18 | 코드 사이닝 **범위 밖**. README에 SmartScreen "추가 정보 → 실행" 안내 | 인증서 없음 |
-| D19 | 자동 업데이트 **범위 밖** | 사이닝 없는 업데이트는 신뢰 문제가 있다. 새 버전은 Releases에서 직접 받는다 |
+| D19 | 0.5.0부터 공개 GitHub Releases + 기존 Inno Setup으로 OTA 제공 | 고정 주소·크기·SHA-256 검증 후 사용자가 다운로드·재시작을 확인한다. 코드 서명은 적용하지 않으며 GitHub/HTTPS를 신뢰한다. 0.4.1 이하는 새 설치 파일을 한 번 직접 설치한다 |
 | D20 | 태그 푸시·커밋은 **인간이 한다**. 스크립트·CI가 태그를 만들지 않는다. pyproject version도 이 작업에서 올리지 않는다 | 승인 전 push 금지 |
 | D21 | `RANKED_LIVE_USAGE_APPROVED=false` 정책 문구는 README에 그대로 둔다 | 공개 live 배포에는 서면 정책 확인이 필요 |
 

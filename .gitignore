@@ -19,4 +19,5 @@ data/*
 # PyInstaller/Inno Setup outputs (script/package.ps1).
 /build/
 /dist/
-/.omc/
+# Local agent state and validation artifacts, including app/.omc/.
+.omc/

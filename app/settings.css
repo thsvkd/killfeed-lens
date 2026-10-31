@@ -52,3 +52,9 @@ kbd { font: 600 10.5px/1 var(--font-num); padding: 2px 5px; border: 1px solid va
 .actions { gap: 8px; justify-content: flex-start; }
 .btn { height: 30px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--line-2); background: var(--raise); font-size: 12px; cursor: pointer; }
 .btn:hover { background: #1C2330; }
+.btn:disabled { cursor: default; opacity: .55; }
+.update-row { justify-content: space-between; align-items: flex-start; }
+.update-row .txt { overflow-wrap: anywhere; }
+.update-row .btn { flex: none; white-space: nowrap; }
+#update-progress { display: block; width: calc(100% - 28px); height: 6px; margin: 0 14px 12px; accent-color: var(--alive); }
+#update-progress[hidden] { display: none; }

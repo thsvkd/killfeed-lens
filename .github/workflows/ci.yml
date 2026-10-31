@@ -48,8 +48,28 @@ jobs:
       - name: Capability audit
         run: uv run python scripts/audit_capabilities.py
 
+  test-app:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node (Electron app)
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install app dependencies
+        run: npm ci --prefix app --no-audit --no-fund
+
+      - name: Test updater, isolated installer helper and renderers
+        run: npm test --prefix app
+
   smoke-packaged:
-    needs: test
+    needs: [test, test-app]
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
