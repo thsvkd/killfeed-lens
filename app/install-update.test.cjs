@@ -15,7 +15,9 @@ let root, env, stub, launcher, powershell, serial = 0;
 
 before(async () => {
   if (!windows) return;
-  root = await fs.mkdtemp(path.join(os.tmpdir(), 'kfl-helper-한글 space-'));
+  // Legacy CodeDOM compilation can narrow TEMP paths on English Windows. Compile in ASCII;
+  // every runtime job below still uses Unicode and spaces, as real installed profiles do.
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'kfl-helper-test-'));
   env = { ...process.env, HOME: path.join(root, 'profile'), USERPROFILE: path.join(root, 'profile'),
     APPDATA: path.join(root, 'roaming'), LOCALAPPDATA: path.join(root, 'local'),
     TEMP: path.join(root, 'tmp'), TMP: path.join(root, 'tmp'),
@@ -52,7 +54,7 @@ Add-Type -OutputAssembly $LauncherOutput -OutputType WindowsApplication -TypeDef
 after(async () => { if (root) await fs.rm(root, { recursive: true, force: true }); });
 
 async function job(t) {
-  const dir = path.join(root, `case-${serial++}`);
+  const dir = path.join(root, `case-한글 space-${serial++}`);
   const cache = path.join(dir, 'updates', 'download-fixture');
   const appExe = path.join(dir, 'Programs 앱', 'KillfeedLens.exe');
   await fs.mkdir(cache, { recursive: true }); await fs.mkdir(path.dirname(appExe), { recursive: true });
