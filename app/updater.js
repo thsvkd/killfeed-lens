@@ -199,7 +199,7 @@ class Updater {
       const diagnostic = await fsp.open(path.join(job, 'helper.log'), 'a');
       let failure;
       try {
-        child = childProcess.spawn(executable, [script, config], { windowsHide: true, detached: true,
+        child = childProcess.spawn(executable, [], { windowsHide: true, detached: true,
           stdio: ['ignore', diagnostic.fd, diagnostic.fd] });
         child.once('error', (error) => { failure = error; });
         child.once('exit', (code) => { failure ??= new Error(`설치 보조 프로세스가 종료되었습니다 (코드 ${code}).`); });

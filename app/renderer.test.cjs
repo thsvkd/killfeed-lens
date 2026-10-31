@@ -87,7 +87,7 @@ app.whenReady().then(async () => {
       await new Promise(r=>setTimeout(r,40));
       values.push(Number(getComputedStyle(el,'::before').opacity));
       if(i===5) KF.heat(el,at);
-      if(i===10) {const copy=document.createElement('div');copy.className='hot-able';document.body.append(copy);KF.heat(copy,at);rebuilt=Math.abs(Number(getComputedStyle(copy,'::before').opacity)-Number(getComputedStyle(el,'::before').opacity));}
+      if(i===10) {await new Promise(r=>requestAnimationFrame(r));const copy=document.createElement('div');copy.className='hot-able';document.body.append(copy);KF.heat(copy,at);rebuilt=Math.abs(Number(getComputedStyle(copy,'::before').opacity)-Number(getComputedStyle(el,'::before').opacity));}
     }
     return {values,rebuilt,active:document.getAnimations().filter(a=>a.playState==='running' && a.effect.target.classList.contains('hot-able')).map(a=>({target:a.effect.target.className,current:a.currentTime,start:a.startTime,timing:a.effect.getTiming()}))};
   })()`);

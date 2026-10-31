@@ -14,14 +14,12 @@ internal static class UpdateLauncher {
         string jobDir = AppDomain.CurrentDomain.BaseDirectory;
         string log = Path.Combine(jobDir, "launcher.log");
         try {
-            if (args.Length != 2) return 2;
-            string script = Path.GetFullPath(args[0]);
-            string config = Path.GetFullPath(args[1]);
-            string expectedScript = Path.Combine(jobDir, "install-update.ps1");
-            string expectedConfig = Path.Combine(jobDir, "job.json");
-            if (!String.Equals(script, expectedScript, StringComparison.OrdinalIgnoreCase)
-                || !String.Equals(config, expectedConfig, StringComparison.OrdinalIgnoreCase)
-                || !File.Exists(script) || !File.Exists(config)) return 2;
+            if (args.Length != 0) return 2;
+            // Derive siblings from the running image instead of comparing equivalent short/
+            // long path strings (e.g. RUNNER~1 versus runneradmin). No caller-selected files.
+            string script = Path.Combine(jobDir, "install-update.ps1");
+            string config = Path.Combine(jobDir, "job.json");
+            if (!File.Exists(script) || !File.Exists(config)) return 2;
 
             string powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
                 "WindowsPowerShell", "v1.0", "powershell.exe");

@@ -87,8 +87,11 @@ test('helper waits, installs in the current Unicode path, never reboots, and res
   for (const flag of ['/VERYSILENT', '/NORESTART', '/NOCLOSEAPPLICATIONS', '/NOFORCECLOSEAPPLICATIONS', '/NORESTARTAPPLICATIONS']) {
     assert.ok(args.includes(flag), `missing ${flag}`);
   }
-  assert.ok(args.includes(`/DIR=${path.dirname(j.appExe)}`));
-  assert.ok(args.includes(`/LOG=${path.join(j.cache, 'install.log')}`));
+  const installedDir = args.find((arg) => arg.startsWith('/DIR=')).slice(5);
+  const installedLog = args.find((arg) => arg.startsWith('/LOG=')).slice(5);
+  assert.equal(await fs.realpath(installedDir), await fs.realpath(path.dirname(j.appExe)));
+  assert.equal(path.basename(installedLog), 'install.log');
+  assert.equal(await fs.realpath(path.dirname(installedLog)), await fs.realpath(j.cache));
   const started = path.join(path.dirname(j.appExe), 'app-started.txt');
   for (let i = 0; i < 40; i++) {
     try { assert.equal(await fs.readFile(started, 'utf8'), 'started\n'); return; }
